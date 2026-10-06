@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@layer utilities {
+  @keyframes scanline {
+    0% {
+      top: 4%;
+    }
+    50% {
+      top: 94%;
+    }
+    100% {
+      top: 4%;
+    }
+  }
+
+  .animate-scan-line {
+    animation: scanline 2.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+}
+
+:root {
+  --color-cafe-dark: #3A1E0D;
+  --color-cafe-accent: #D4A373;
+  --color-cafe-cream: #FDFBF7;
+}
+
+body {
+  background-color: #F8F4EC;
+  color: #2D1808;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+}
