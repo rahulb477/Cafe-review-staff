@@ -1,27 +1,32 @@
 "use client";
 
-import React, { useEffect, useState, use, useCallback } from "react";
+import React, { useCallback, useEffect, useState, use } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { Gift, QrCode, Search, Users, X } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
   describeErrorForDiagnostics,
   toStaffServiceError,
 } from "@/services/staffErrors";
-import {
-  ChevronLeft,
-  Search,
-  QrCode,
-  Gift,
-  Loader2,
-  X,
-  Users,
-  AlertCircle,
-  RefreshCw,
-} from "lucide-react";
-import { CustomerProfile } from "@/services/types";
+import type { CustomerProfile } from "@/services/types";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { SectionHeading } from "@/components/ui/Card";
+import { CustomerCard } from "@/components/ui/CustomerCard";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingState } from "@/components/ui/LoadingState";
 
+type FilterTab = "all" | "reward_ready";
+
+/**
+ * Screen 9 — Customer Lookup.
+ *
+ * The directory is always read through FirebaseService.getCustomers(), which
+ * pins `clientId` in the Firestore query itself, so customers belonging to
+ * another business can never be listed. Nothing here is hardcoded.
+ */
 export default function CustomerLookupPage({
   params,
 }: {
@@ -30,21 +35,14 @@ export default function CustomerLookupPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const router = useRouter();
   const { clientId } = useStaffApp();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"all" | "reward_ready">("all");
+  const [activeTab, setActiveTab] = useState<FilterTab>("all");
 
-  /**
-   * Every query is scoped by the authenticated staff clientId inside the
-   * service (Firestore rules are not filters, so the query itself pins
-   * `clientId`). A search term is translated into equality/prefix Firestore
-   * queries — the directory is never downloaded and filtered in the browser.
-   */
   const fetchCustomers = useCallback(async (term: string) => {
     setIsLoading(true);
     try {
@@ -61,8 +59,7 @@ export default function CustomerLookupPage({
     }
   }, []);
 
-  // Debounced search — one Firestore query per settled term instead of one per
-  // keystroke.
+  // Debounced search — one Firestore query per settled term, not per keystroke.
   useEffect(() => {
     if (!clientId) return;
     const handle = window.setTimeout(() => {
@@ -71,185 +68,162 @@ export default function CustomerLookupPage({
     return () => window.clearTimeout(handle);
   }, [clientId, fetchCustomers, searchQuery]);
 
-  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchQuery(e.target.value);
-  };
-
-  // Filter based on tab
-  const filteredCustomers = customers.filter((c) => {
-    if (activeTab === "reward_ready") return c.stamps >= c.stampTarget || c.isEligibleForReward;
+  const visibleCustomers = customers.filter((customer) => {
+    if (activeTab === "reward_ready") {
+      return customer.isEligibleForReward || customer.stamps >= customer.stampTarget;
+    }
     return true;
   });
 
-  return (
-    <div className="max-w-md mx-auto space-y-4 pb-6 select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/staff/${clientSlug}`}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
-        >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Customer Lookup
-        </h1>
-        <div className="w-10" />
-      </div>
+  const rewardReadyCount = customers.filter(
+    (customer) => customer.isEligibleForReward || customer.stamps >= customer.stampTarget
+  ).length;
 
-      {/* Search Field with QR shortcut matching Screen 9 */}
-      <div className="relative flex items-center gap-2">
-        <div className="relative flex-1">
-          <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-stone-400">
-            <Search className="w-4 h-4" />
-          </div>
+  return (
+    <div className="mx-auto w-full max-w-md space-y-4">
+      <ScreenHeader title="Customer Lookup" backHref={`/staff/${clientSlug}`} />
+
+      {/* Search + QR shortcut */}
+      <div className="flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <span className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5 text-espresso-300">
+            <Search className="size-4" aria-hidden="true" />
+          </span>
           <input
-            type="text"
+            type="search"
             value={searchQuery}
-            onChange={handleSearchChange}
-            placeholder="Search by customer ID or name..."
-            className="w-full pl-10 pr-9 py-3 bg-white rounded-2xl border border-[#EBDCCF] text-xs sm:text-sm text-[#3A1E0D] placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-[#3A1E0D] shadow-xs"
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="Search by customer ID…"
+            aria-label="Search customers by ID, name or phone"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            className={cn(
+              "h-12 w-full rounded-lg border border-line bg-cream-50 pl-10 pr-10",
+              "text-base font-medium text-espresso-900 placeholder-espresso-300 shadow-hairline",
+              "focus:border-espresso-300 focus:outline-none focus:ring-2 focus:ring-espresso-800/15",
+              "sm:text-sm [&::-webkit-search-cancel-button]:hidden"
+            )}
           />
           {searchQuery && (
             <button
+              type="button"
               onClick={() => setSearchQuery("")}
-              className="absolute inset-y-0 right-0 pr-3 flex items-center text-stone-400 hover:text-stone-600 cursor-pointer"
+              aria-label="Clear search"
+              className="press-scale absolute inset-y-0 right-0 flex items-center pr-3.5 text-espresso-300 hover:text-espresso-700"
             >
-              <X className="w-4 h-4" />
+              <X className="size-4" aria-hidden="true" />
             </button>
           )}
         </div>
 
-        {/* QR Scan Button Shortcut */}
         <Link
           href={`/staff/${clientSlug}/scan`}
-          className="w-12 h-12 bg-[#3A1E0D] hover:bg-[#4E2A14] text-[#E6B875] rounded-2xl flex items-center justify-center shadow-xs transition-colors shrink-0"
-          title="Scan QR Code"
+          aria-label="Scan a customer QR code"
+          className={cn(
+            "press-scale flex size-12 shrink-0 items-center justify-center rounded-lg",
+            "bg-espresso-800 text-caramel-300 shadow-card hover:bg-espresso-700"
+          )}
         >
-          <QrCode className="w-5 h-5" />
+          <QrCode className="size-5" aria-hidden="true" />
         </Link>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+      {/* Filters */}
+      <div className="scrollbar-none -mx-1 flex items-center gap-2 overflow-x-auto px-1 pb-0.5">
         <button
+          type="button"
           onClick={() => setActiveTab("all")}
-          className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all shrink-0 cursor-pointer ${
+          aria-pressed={activeTab === "all"}
+          className={cn(
+            "press-scale shrink-0 rounded-full border px-3.5 py-1.5 text-[0.74rem] font-bold",
             activeTab === "all"
-              ? "bg-[#3A1E0D] text-white shadow-xs"
-              : "bg-white text-stone-600 hover:bg-stone-100 border border-[#EBDCCF]"
-          }`}
+              ? "border-espresso-800 bg-espresso-800 text-cream-50 shadow-hairline"
+              : "border-line bg-cream-50 text-espresso-500 hover:bg-sand-100"
+          )}
         >
-          All Customers ({customers.length})
+          All Customers{!isLoading && ` (${customers.length})`}
         </button>
         <button
+          type="button"
           onClick={() => setActiveTab("reward_ready")}
-          className={`px-3.5 py-1.5 rounded-full text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 cursor-pointer ${
+          aria-pressed={activeTab === "reward_ready"}
+          className={cn(
+            "press-scale flex shrink-0 items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[0.74rem] font-bold",
             activeTab === "reward_ready"
-              ? "bg-emerald-700 text-white shadow-xs"
-              : "bg-white text-emerald-800 hover:bg-emerald-50 border border-emerald-200"
-          }`}
+              ? "border-leaf-600 bg-leaf-600 text-cream-50 shadow-hairline"
+              : "border-leaf-200 bg-leaf-50 text-leaf-700 hover:bg-leaf-100"
+          )}
         >
-          <Gift className="w-3.5 h-3.5" />
-          <span>Reward Ready</span>
+          <Gift className="size-3.5" aria-hidden="true" />
+          Reward Ready{!isLoading && ` (${rewardReadyCount})`}
         </button>
       </div>
 
-      {/* Customers List Header */}
-      <div className="flex items-center justify-between px-1">
-        <h2 className="text-xs font-bold uppercase tracking-wider text-stone-400">
-          Customer Directory
-        </h2>
-        <span className="text-[11px] text-stone-400">
-          {filteredCustomers.length} results
-        </span>
-      </div>
+      <SectionHeading
+        title={searchQuery ? "Results" : "Recent Customers"}
+        action={
+          !isLoading && !errorMessage ? (
+            <span className="text-[0.7rem] font-semibold text-espresso-300 tabular-nums">
+              {visibleCustomers.length} shown
+            </span>
+          ) : undefined
+        }
+      />
 
-      {/* Customer List matching Screen 9 */}
+      {/* Directory */}
       {errorMessage ? (
-        <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs space-y-2">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span className="flex-1">{errorMessage}</span>
-          </div>
-          <button
-            type="button"
-            onClick={() => void fetchCustomers(searchQuery)}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-red-200 font-bold text-[11px] hover:bg-red-50 cursor-pointer"
-          >
-            <RefreshCw className="w-3 h-3" />
-            <span>Retry</span>
-          </button>
-        </div>
+        <ErrorState
+          message={errorMessage}
+          title="Customer lookup failed"
+          onRetry={() => void fetchCustomers(searchQuery)}
+        />
       ) : isLoading ? (
-        <div className="py-12 text-center text-stone-400">
-          <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
-          <p className="text-xs">Loading customer directory from Firestore...</p>
-        </div>
-      ) : filteredCustomers.length === 0 ? (
-        <div className="bg-white rounded-3xl p-8 text-center border border-[#EBDCCF] shadow-xs">
-          <Users className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-          <p className="font-bold text-sm text-[#3A1E0D]">
-            {searchQuery ? `No customers match "${searchQuery}"` : "No registered customers yet"}
-          </p>
-          <p className="text-xs text-stone-400 mt-1">
-            {searchQuery ? "Check the search spelling or clear the filter." : "Customers will appear here when they join and scan their pass."}
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2.5">
-          {filteredCustomers.map((cust) => {
-            const isRewardReady = cust.stamps >= cust.stampTarget || cust.isEligibleForReward;
-            return (
-              <Link
-                key={cust.id}
-                href={`/staff/${clientSlug}/customers/${cust.id}`}
-                className={`flex items-center justify-between p-3.5 sm:p-4 bg-white rounded-2xl border transition-all hover:border-[#3A1E0D] hover:shadow-md group ${
-                  isRewardReady ? "border-emerald-300 bg-emerald-50/20" : "border-[#EBDCCF]"
-                }`}
+        <LoadingState rows={4} label="Loading customers…" />
+      ) : visibleCustomers.length === 0 ? (
+        <EmptyState
+          icon={<Users />}
+          title={
+            searchQuery
+              ? `No customers match “${searchQuery}”`
+              : activeTab === "reward_ready"
+                ? "No rewards ready"
+                : "No customers yet"
+          }
+          message={
+            searchQuery
+              ? "Check the spelling, or clear the search to see the full directory."
+              : activeTab === "reward_ready"
+                ? "Customers who complete every stamp will appear here."
+                : "Customers appear here once they register with this business."
+          }
+          action={
+            searchQuery ? (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                className="press-scale rounded-md border border-line bg-cream-100 px-3 py-1.5 text-[0.74rem] font-bold text-espresso-700 hover:bg-sand-100"
               >
-                {/* Left Profile info */}
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-11 h-11 rounded-full flex items-center justify-center font-extrabold text-sm text-[#3A1E0D] shadow-inner shrink-0"
-                    style={{ backgroundColor: cust.avatarBg }}
-                  >
-                    {cust.avatarInitial}
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-sm text-[#3A1E0D] group-hover:text-[#2A1408]">
-                        {cust.name}
-                      </span>
-                      {isRewardReady && (
-                        <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800 text-[10px] font-extrabold flex items-center gap-0.5">
-                          <Gift className="w-2.5 h-2.5" /> Ready
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-stone-400 mt-0.5">
-                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Table not provided"}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Stamp Count & Time */}
-                <div className="text-right">
-                  <div
-                    className={`font-extrabold text-sm ${
-                      isRewardReady ? "text-emerald-700" : "text-[#3A1E0D]"
-                    }`}
-                  >
-                    {cust.stamps} / {cust.stampTarget}
-                  </div>
-                  <div className="text-[10px] text-stone-400 mt-0.5">
-                    {cust.totalVisits} {cust.totalVisits === 1 ? "visit" : "visits"}
-                  </div>
-                </div>
-              </Link>
-            );
-          })}
-        </div>
+                Clear search
+              </button>
+            ) : undefined
+          }
+        />
+      ) : (
+        <ul className="space-y-2.5">
+          {visibleCustomers.map((customer) => (
+            <li key={customer.id}>
+              <CustomerCard
+                customer={customer}
+                href={`/staff/${clientSlug}/customers/${customer.id}`}
+                activityMillis={customer.lastActivityMillis}
+                activityFallback={`${customer.totalVisits} ${
+                  customer.totalVisits === 1 ? "visit" : "visits"
+                }`}
+              />
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

@@ -12,6 +12,8 @@ export interface ClientConfig {
   stampTarget: number;
   rewardName: string;
   rewardDescription: string;
+  /** clients/{clientId}.loyalty.rewardImage — optional reward artwork. */
+  rewardImageUrl?: string | null;
   /** clients/{clientId}.loyalty.enabled — false disables counter stamps. */
   loyaltyEnabled: boolean;
   primaryColor: string;
@@ -65,6 +67,12 @@ export interface CustomerProfile {
   lastStampAt?: string;
   updatedAt?: string;
   createdAt?: string;
+  /**
+   * Newest of lastStampAt / lastVisitAt / updatedAt / createdAt in epoch ms.
+   * Presentation only (relative "2 mins ago" in the lookup list) — derived
+   * from the same Firestore fields, never stored or invented.
+   */
+  lastActivityMillis?: number;
 }
 
 export interface StampTransactionResult {

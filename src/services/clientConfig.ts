@@ -135,6 +135,7 @@ export function buildClientConfig(clientId: string, data: unknown): ClientConfig
     stampTarget,
     rewardName,
     rewardDescription,
+    rewardImageUrl: firstString(loyalty.rewardImage, record.rewardImage) ?? null,
     loyaltyEnabled,
     primaryColor: firstString(theme.primary, record.primaryColor) || "#3A1E0D",
     accentColor: firstString(theme.accent, record.accentColor) || "#D4A373",

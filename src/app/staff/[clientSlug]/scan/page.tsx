@@ -3,20 +3,22 @@
 import React, { use, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import jsQR from "jsqr";
+import {
+  Flashlight,
+  FlashlightOff,
+  ImagePlus,
+  RefreshCw,
+} from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import { describeErrorForDiagnostics, toStaffServiceError } from "@/services/staffErrors";
-import jsQR from "jsqr";
-import {
-  AlertCircle,
-  Camera,
-  ChevronLeft,
-  Flashlight,
-  FlashlightOff,
-  Image as ImageIcon,
-  Loader2,
-  RefreshCw,
-} from "lucide-react";
+import { ScannerContainer, type ScannerPhase } from "@/components/ui/ScannerContainer";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { Button, LinkButton } from "@/components/ui/Button";
+import { Card } from "@/components/ui/Card";
+import { ErrorState } from "@/components/ui/ErrorState";
 
 /** Decode at most ~5 frames/second — never on every camera frame. */
 const DECODE_INTERVAL_MS = 180;
@@ -25,6 +27,20 @@ const MAX_DECODE_WIDTH = 480;
 /** Downscale uploaded images before decoding. */
 const MAX_UPLOAD_DIMENSION = 1000;
 
+/**
+ * Screen 3 — Scan Customer QR.
+ *
+ * Camera lifecycle is deterministic: permission → loading → live, an explicit
+ * denied state with a recovery button, full teardown on cancel / back /
+ * unmount / background, and a scan lock so one code produces exactly one
+ * Firestore lookup.
+ *
+ * Resolution chain (unchanged):
+ *   payload → customerTokens/{token} → verify token.clientId === staffClientId
+ *           → customers/{customerId} → loyaltyAccounts/{customerId}
+ * A clientId inside the QR is never trusted; it is always re-checked against
+ * the authenticated staff member's clientId inside FirebaseService.
+ */
 export default function QRScannerPage({
   params,
 }: {
@@ -47,9 +63,8 @@ export default function QRScannerPage({
   const mountedRef = useRef(false);
   const canvasContextRef = useRef<CanvasRenderingContext2D | null>(null);
 
-  // Stable refs so the decode loop never needs re-creating (keeps decoding cheap
-  // and stops the effect churn that made the old scanner stutter). They are
-  // synced in effects, never during render.
+  // Stable refs so the decode loop is never re-created (keeps decoding cheap
+  // and stops the effect churn that made the old scanner stutter).
   const clientIdRef = useRef<string | null>(clientId);
   const playChimeRef = useRef(playChime);
   const routerRef = useRef(router);
@@ -64,11 +79,12 @@ export default function QRScannerPage({
     routerRef.current = router;
   }, [router]);
 
-  const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
-  const [isScanning, setIsScanning] = useState(true);
+  const [phase, setPhase] = useState<ScannerPhase>("starting");
   const [torchOn, setTorchOn] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  const sessionReady = Boolean(clientId);
 
   /* ------------------------------------------------------------------ *
    * Camera + decoder lifecycle helpers (idempotent, always safe to call)
@@ -108,7 +124,7 @@ export default function QRScannerPage({
     }
   }, []);
 
-  /** Full teardown: decoder + camera (used by Cancel, Back, unmount, pagehide). */
+  /** Full teardown: decoder + camera (Cancel, Back, unmount, pagehide). */
   const releaseEverything = useCallback(() => {
     stopDecodeLoop();
     releaseCamera();
@@ -127,6 +143,8 @@ export default function QRScannerPage({
       if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
         throw new Error("Camera access is not supported by this browser.");
       }
+
+      if (mountedRef.current) setPhase("starting");
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -153,14 +171,20 @@ export default function QRScannerPage({
       video.setAttribute("playsinline", "true");
       await video.play().catch(() => undefined);
 
-      setHasCameraPermission(true);
+      setPhase("live");
+      setNotice("");
       return true;
     } catch (error: unknown) {
       console.warn("[scanner] camera notice:", describeErrorForDiagnostics(error));
       if (!mountedRef.current) return false;
-      setHasCameraPermission(false);
-      setErrorMessage(
-        "Camera access was not granted. You can upload a QR image or look up the customer by ID."
+      const message = error instanceof Error ? error.message : "";
+      const unsupported =
+        /not supported|HTTPS/i.test(message) || !navigator.mediaDevices?.getUserMedia;
+      setPhase(unsupported ? "unsupported" : "denied");
+      setNotice(
+        unsupported
+          ? "This browser cannot open the camera here. Use Upload QR or Customer Lookup instead."
+          : "Camera permission was not granted. Use Upload QR or Customer Lookup instead."
       );
       return false;
     }
@@ -184,8 +208,7 @@ export default function QRScannerPage({
       // Lock immediately: pause the decoder and stop the camera so one code is
       // never processed dozens of times and no Firebase request runs per frame.
       scanLockRef.current = true;
-      setIsProcessing(true);
-      setIsScanning(false);
+      setPhase("processing");
       setErrorMessage("");
       stopDecodeLoop();
       releaseCamera();
@@ -201,7 +224,6 @@ export default function QRScannerPage({
         if (!mountedRef.current) return;
         setErrorMessage(staffErr.message);
         playChimeRef.current("error");
-        setIsProcessing(false);
         // Stay locked: the user must choose "Scan Again" to resume scanning.
       }
     },
@@ -262,15 +284,11 @@ export default function QRScannerPage({
     rafRef.current = window.requestAnimationFrame(tick);
   }, [decodeVideoFrame]);
 
-  /* ------------------------------------------------------------------ *
-   * Scan handling — locked until the user explicitly scans again
-   * ------------------------------------------------------------------ */
-
+  /** Explicit restart — the only way back into the decode loop after a lock. */
   const handleScanAgain = useCallback(async () => {
     scanLockRef.current = false;
     setErrorMessage("");
-    setIsProcessing(false);
-    setIsScanning(true);
+    setPhase("starting");
     lastDecodeAtRef.current = 0;
     const ready = await ensureCameraReady();
     if (ready && mountedRef.current) startDecodeLoop();
@@ -314,7 +332,7 @@ export default function QRScannerPage({
     };
   }, [ensureCameraReady, startDecodeLoop]);
 
-  // Stop the camera whenever the app leaves the foreground / page unloads.
+  // Stop the camera whenever the app leaves the foreground / the page unloads.
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
@@ -322,7 +340,7 @@ export default function QRScannerPage({
         releaseCamera();
         return;
       }
-      // Back in the foreground: only resume when no scan is locked (Scan Again).
+      // Back in the foreground: only resume when no scan is locked.
       if (!scanLockRef.current && mountedRef.current && clientIdRef.current) {
         void ensureCameraReady().then((ready) => {
           if (ready && !scanLockRef.current && mountedRef.current) startDecodeLoop();
@@ -350,6 +368,10 @@ export default function QRScannerPage({
     };
   }, [ensureCameraReady, releaseCamera, startDecodeLoop, stopDecodeLoop]);
 
+  /* ------------------------------------------------------------------ *
+   * Controls
+   * ------------------------------------------------------------------ */
+
   const toggleFlashlight = async () => {
     const track = streamRef.current?.getVideoTracks()[0];
     if (!track) return;
@@ -362,9 +384,12 @@ export default function QRScannerPage({
           advanced: [{ torch: nextState } as unknown as MediaTrackConstraintSet],
         });
         setTorchOn(nextState);
+      } else {
+        setNotice("This device does not expose a torch to the browser.");
       }
     } catch (error) {
-      console.warn("Torch control notice:", error);
+      console.warn("[scanner] torch notice:", error);
+      setNotice("The flashlight could not be toggled on this device.");
     }
   };
 
@@ -407,156 +432,140 @@ export default function QRScannerPage({
     reader.readAsDataURL(file);
   };
 
-  const sessionReady = Boolean(clientId);
+  const isLocked = Boolean(errorMessage);
 
   return (
-    <div className="min-h-[85vh] flex flex-col justify-between max-w-md mx-auto select-none">
-      {/* Hidden Canvas for QR decoding (decoding only — never rendered over UI) */}
-      <canvas ref={canvasRef} className="hidden" />
+    <div className="mx-auto flex w-full max-w-md flex-col gap-4">
+      {/* Offscreen decode canvas — decoding only, never rendered over the UI. */}
+      <canvas ref={canvasRef} className="pointer-events-none hidden" aria-hidden="true" />
       <input
         type="file"
         ref={fileInputRef}
         onChange={handleFileUpload}
         accept="image/*"
         className="hidden"
+        tabIndex={-1}
+        aria-hidden="true"
       />
 
-      {/* Top Header matching Screen 3 */}
-      <div className="flex items-center justify-between py-2">
-        <Link
-          href={`/staff/${clientSlug}`}
-          onClick={releaseEverything}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
-          aria-label="Back to dashboard"
-        >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Scan Customer QR
-        </h1>
-        <div className="w-10" />
-      </div>
+      <ScreenHeader
+        title="Scan Customer QR"
+        backHref={`/staff/${clientSlug}`}
+        onBack={releaseEverything}
+      />
 
-      {/* Main Viewfinder Frame Container (Screen 3) */}
-      <div className="relative my-4 aspect-3/4 w-full bg-[#1A0E06] rounded-3xl overflow-hidden shadow-2xl flex items-center justify-center border-2 border-[#4A2810]">
-        {/* Real Live Video Feed — pointer-events-none so it can never swallow a tap */}
-        <video
-          ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover pointer-events-none"
-          muted
-          playsInline
-          autoPlay
-        />
-
-        {/* Fallback Viewport Background when Camera is Inactive */}
-        {hasCameraPermission === false && (
-          <div className="absolute inset-0 bg-[#2D1808]/90 flex flex-col items-center justify-center p-6 text-center text-white/90 pointer-events-none">
-            <Camera className="w-12 h-12 text-[#E6B875] mb-2 animate-bounce" />
-            <p className="text-sm font-semibold">Camera Scanner</p>
-            <p className="text-xs text-stone-300 mt-1 max-w-xs">
-              Upload a pass photo or look up by ID to verify a customer.
-            </p>
-          </div>
-        )}
-
-        {hasCameraPermission === null && (
-          <div className="absolute inset-0 bg-[#2D1808]/90 flex flex-col items-center justify-center p-6 text-center text-white/90 pointer-events-none">
-            <Loader2 className="w-10 h-10 text-[#E6B875] mb-2 animate-spin" />
-            <p className="text-sm font-semibold">
-              {sessionReady ? "Starting camera..." : "Checking staff session..."}
-            </p>
-          </div>
-        )}
-
-        {/* Ambient Dark Overlay with Cutout */}
-        <div className="absolute inset-0 bg-black/40 pointer-events-none" />
-
-        {/* White Glowing Scanning Target Box (Screen 3) */}
-        <div className="relative w-64 h-64 sm:w-72 sm:h-72 rounded-3xl border-2 border-white/60 shadow-[0_0_30px_rgba(255,255,255,0.2)] flex items-center justify-center overflow-hidden pointer-events-none">
-          {/* 4 Corner Markers */}
-          <div className="absolute top-2 left-2 w-6 h-6 border-t-4 border-l-4 border-white rounded-tl-xl" />
-          <div className="absolute top-2 right-2 w-6 h-6 border-t-4 border-r-4 border-white rounded-tr-xl" />
-          <div className="absolute bottom-2 left-2 w-6 h-6 border-b-4 border-l-4 border-white rounded-bl-xl" />
-          <div className="absolute bottom-2 right-2 w-6 h-6 border-b-4 border-r-4 border-white rounded-br-xl" />
-
-          {/* Animated Glowing Laser Scanning Line */}
-          {isScanning && !isProcessing && (
-            <div className="absolute left-0 right-0 h-1 bg-gradient-to-r from-transparent via-[#E6B875] to-transparent shadow-[0_0_12px_#E6B875] animate-scan-line" />
-          )}
-
-          {/* Processing Indicator */}
-          {isProcessing && (
-            <div className="absolute inset-0 bg-black/70 backdrop-blur-xs flex flex-col items-center justify-center text-white">
-              <Loader2 className="w-10 h-10 text-[#E6B875] animate-spin mb-2" />
-              <span className="text-xs font-bold tracking-wide">Validating Customer QR...</span>
-            </div>
-          )}
-        </div>
-
-        {/* Bottom Controls Bar inside Frame (Torch & Gallery) */}
-        <div className="absolute bottom-5 inset-x-8 flex items-center justify-between z-20 pointer-events-auto">
-          {/* Flashlight Button */}
+      <ScannerContainer
+        videoRef={videoRef}
+        phase={phase}
+        scanning={!isLocked}
+        message={
+          phase === "starting" && !sessionReady ? "Checking staff session…" : undefined
+        }
+        onRequestPermission={() => void handleScanAgain()}
+        className="aspect-3/4 w-full"
+      >
+        {/* Preview controls — always above every overlay layer. */}
+        <div className="pointer-events-auto absolute inset-x-0 bottom-4 z-20 flex items-center justify-center gap-3 px-5">
           <button
             type="button"
-            onClick={toggleFlashlight}
-            className={`w-11 h-11 rounded-full backdrop-blur-md flex items-center justify-center transition-colors shadow-lg ${
+            onClick={() => void toggleFlashlight()}
+            disabled={phase !== "live"}
+            aria-label={torchOn ? "Turn flashlight off" : "Turn flashlight on"}
+            aria-pressed={torchOn}
+            className={cn(
+              "press-scale inline-flex size-11 items-center justify-center rounded-full",
+              "border border-cream-50/20 backdrop-blur-sm",
+              "disabled:cursor-not-allowed disabled:opacity-40",
               torchOn
-                ? "bg-amber-400 text-stone-900"
-                : "bg-black/50 text-white hover:bg-black/70"
-            }`}
-            aria-label="Toggle flashlight"
+                ? "bg-caramel-300 text-espresso-900"
+                : "bg-espresso-950/60 text-cream-100 hover:bg-espresso-950/80"
+            )}
           >
-            {torchOn ? <Flashlight className="w-5 h-5" /> : <FlashlightOff className="w-5 h-5" />}
+            {torchOn ? (
+              <Flashlight className="size-[1.15rem]" aria-hidden="true" />
+            ) : (
+              <FlashlightOff className="size-[1.15rem]" aria-hidden="true" />
+            )}
           </button>
 
-          {/* Upload Photo Button */}
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="w-11 h-11 rounded-full bg-black/50 hover:bg-black/70 text-white backdrop-blur-md flex items-center justify-center transition-colors shadow-lg cursor-pointer"
             aria-label="Upload QR image"
-            title="Upload QR image"
+            className={cn(
+              "press-scale inline-flex size-11 items-center justify-center rounded-full",
+              "border border-cream-50/20 bg-espresso-950/60 text-cream-100 backdrop-blur-sm",
+              "hover:bg-espresso-950/80"
+            )}
           >
-            <ImageIcon className="w-5 h-5" />
+            <ImagePlus className="size-[1.15rem]" aria-hidden="true" />
           </button>
         </div>
-      </div>
+      </ScannerContainer>
 
-      {/* Instructions Text (Screen 3) */}
-      <div className="text-center px-4 my-2">
-        <p className="text-xs sm:text-sm font-medium text-stone-600">
-          {errorMessage && !isProcessing
-            ? "Scanning paused — press Scan Again to continue"
-            : "Position the customer's QR code within the frame"}
-        </p>
-      </div>
+      {/* Instruction line */}
+      <p className="px-2 text-center text-[0.8rem] font-medium leading-relaxed text-espresso-500">
+        {isLocked
+          ? "Scanning paused — press Scan Again to continue."
+          : "Position the customer's QR code within the frame"}
+      </p>
 
-      {/* Error Banner if any */}
+      {notice && !isLocked && (
+        <Card radius="lg" tone="sand" className="px-3.5 py-2.5">
+          <p className="text-[0.74rem] font-semibold leading-relaxed text-espresso-600">
+            {notice}
+          </p>
+        </Card>
+      )}
+
       {errorMessage && (
-        <div className="mb-3 p-3 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2 animate-in fade-in">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span className="flex-1">{errorMessage}</span>
-          <button
-            type="button"
-            onClick={() => void handleScanAgain()}
-            className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-red-200 text-red-700 font-bold text-[10px] hover:bg-red-50 cursor-pointer"
+        <ErrorState
+          inline
+          message={errorMessage}
+          retryLabel="Scan Again"
+          onRetry={() => void handleScanAgain()}
+        />
+      )}
+
+      {/* Fallbacks that never depend on the camera */}
+      {(phase === "denied" || phase === "unsupported") && (
+        <div className="grid grid-cols-2 gap-2.5">
+          <LinkButton
+            href={`/staff/${clientSlug}/customers`}
+            variant="secondary"
+            size="md"
+            onClick={releaseEverything}
           >
-            <RefreshCw className="w-3 h-3" />
-            <span>Scan Again</span>
-          </button>
+            Customer Lookup
+          </LinkButton>
+          <Button
+            variant="secondary"
+            size="md"
+            iconLeft={<ImagePlus />}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            Upload QR
+          </Button>
         </div>
       )}
 
-      {/* Cancel Button (Screen 3) */}
-      <div className="pt-2">
-        <Link
-          href={`/staff/${clientSlug}`}
-          onClick={releaseEverything}
-          className="w-full py-3.5 px-4 bg-[#F5EBE0] hover:bg-[#ECD8C8] active:scale-[0.99] text-[#3A1E0D] font-bold text-sm rounded-2xl border border-[#DFC8B4] text-center block transition-all shadow-xs"
-        >
-          Cancel
-        </Link>
+      <div className="flex items-center justify-center gap-2 pt-1">
+        <RefreshCw className="size-3.5 text-espresso-300" aria-hidden="true" />
+        <span className="text-[0.68rem] font-medium text-espresso-300">
+          Codes are verified against your assigned business
+        </span>
       </div>
+
+      {/* Cancel — a real navigation that releases the camera first. */}
+      <LinkButton
+        href={`/staff/${clientSlug}`}
+        variant="secondary"
+        size="lg"
+        block
+        onClick={releaseEverything}
+      >
+        Cancel
+      </LinkButton>
     </div>
   );
 }

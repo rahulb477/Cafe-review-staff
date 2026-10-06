@@ -54,6 +54,27 @@ test("resolves the embedded loyalty config (screenshot error regression)", () =>
   assert.equal(config.status, "PUBLISHED");
 });
 
+test("maps the optional reward artwork from loyalty.rewardImage", () => {
+  // The canonical fixture stores rewardImage: null — that must stay null so the
+  // UI falls back to its inline illustration instead of a broken <img>.
+  assert.equal(buildClientConfig("cli_bake01", canonicalClient).rewardImageUrl, null);
+
+  const withArt = {
+    ...canonicalClient,
+    loyalty: { ...canonicalClient.loyalty, rewardImage: "https://cdn.example.test/free-coffee.png" },
+  };
+  assert.equal(
+    buildClientConfig("cli_bake01", withArt).rewardImageUrl,
+    "https://cdn.example.test/free-coffee.png"
+  );
+
+  // Legacy flat field is still accepted.
+  assert.equal(
+    buildClientConfig("c1", { displayName: "Minimal Cafe", rewardImage: "/r.png" }).rewardImageUrl,
+    "/r.png"
+  );
+});
+
 test("honours loyalty.enabled=false", () => {
   const config = buildClientConfig("c1", { ...canonicalClient, loyalty: { enabled: false } });
   assert.equal(config.loyaltyEnabled, false);

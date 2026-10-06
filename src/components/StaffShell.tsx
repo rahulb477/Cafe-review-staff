@@ -2,11 +2,16 @@
 
 import React, { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { StaffHeader } from "./StaffHeader";
-import { StaffDrawer } from "./StaffDrawer";
-import { BottomNav } from "./BottomNav";
-import { DesktopSidebar } from "./DesktopSidebar";
+import { ShieldAlert } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
+import { StaffHeader } from "./StaffHeader";
+import { SideMenu } from "./SideMenu";
+import { BottomNavigation } from "./ui/BottomNavigation";
+import { DesktopSidebar } from "./DesktopSidebar";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
+import { LoadingState } from "./ui/LoadingState";
 
 function getWorkspaceRoute(pathname: string | null): { slug: string; suffix: string } | null {
   if (!pathname || !pathname.startsWith("/staff/")) return null;
@@ -15,6 +20,11 @@ function getWorkspaceRoute(pathname: string | null): { slug: string; suffix: str
   return { slug: decodeURIComponent(match[1]), suffix: match[2] || "" };
 }
 
+/**
+ * Authenticated staff frame: header, side menu, bottom navigation and the
+ * page slot. It never renders a screen until staffUsers/{uid} → clientId →
+ * clients/{clientId} has resolved, so no page can invent a business.
+ */
 export function StaffShell({ children }: { children: React.ReactNode }) {
   const { status, isLoading, authorizationError, staffUser, clientId } = useStaffApp();
   const pathname = usePathname();
@@ -27,63 +37,77 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, router, staffUser, workspaceRoute]);
 
-  // Firebase Auth / staff registry resolution is still running — never show an
-  // authorization error while the session is loading.
+  // Firebase Auth / staff registry still resolving — loading, never an error.
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center text-sm text-[#3A1E0D]">
-        Checking Firebase staff session...
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 pt-safe pb-safe">
+        <LoadingState label="Checking staff session…" />
       </div>
     );
   }
 
   if (status === "error" || !staffUser || !clientId) {
     const detail =
-      process.env.NODE_ENV === "production" ? null : authorizationError?.technical ?? null;
+      process.env.NODE_ENV === "production" ? null : (authorizationError?.technical ?? null);
+
     return (
-      <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center p-6 text-center">
-        <div className="max-w-md rounded-3xl bg-white border border-[#EBDCCF] p-6 shadow-xs">
-          <h1 className="text-lg font-bold text-[#3A1E0D]">Staff session unavailable</h1>
-          <p className="mt-2 text-sm text-stone-600">
-            {authorizationError?.message || "Please sign in with your Firebase staff account."}
+      <div className="flex min-h-dvh items-center justify-center px-5 py-10 pt-safe pb-safe">
+        <Card radius="2xl" className="w-full max-w-sm px-5 py-8 text-center">
+          <span className="mx-auto mb-3 flex size-12 items-center justify-center rounded-full bg-caramel-100 text-caramel-600">
+            <ShieldAlert className="size-6" aria-hidden="true" />
+          </span>
+          <h1 className="text-[1.05rem] font-extrabold text-espresso-900">
+            Staff session unavailable
+          </h1>
+          <p className="mx-auto mt-2 max-w-[19rem] text-[0.8rem] font-medium leading-relaxed text-espresso-500">
+            {authorizationError?.message || "Please sign in with your staff account."}
           </p>
           {detail && (
-            <p className="mt-2 text-[10px] font-mono text-stone-400 break-words">{detail}</p>
+            <p className="mt-3 break-words rounded-md bg-cream-200 px-2.5 py-2 font-mono text-[0.6rem] leading-relaxed text-espresso-400">
+              {detail}
+            </p>
           )}
-          <button
-            type="button"
+          <Button
+            className="mt-5"
+            size="lg"
+            block
             onClick={() => router.replace("/staff/login")}
-            className="mt-5 rounded-xl bg-[#3A1E0D] px-4 py-2.5 text-sm font-bold text-white"
           >
             Go to Staff Login
-          </button>
-        </div>
+          </Button>
+        </Card>
       </div>
     );
   }
 
-  if (
-    workspaceRoute &&
-    workspaceRoute.slug.toLowerCase() !== clientId.toLowerCase()
-  ) {
+  // The URL slug is never a tenant selector: a mismatch is simply corrected.
+  if (workspaceRoute && workspaceRoute.slug.toLowerCase() !== clientId.toLowerCase()) {
     return (
-      <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center text-sm text-[#3A1E0D]">
-        Opening your assigned business...
+      <div className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 pt-safe pb-safe">
+        <LoadingState label="Opening your assigned business…" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#F8F4EC] text-[#2D1808] flex">
+    <div className="flex min-h-dvh bg-transparent">
       <DesktopSidebar />
-      <div className="flex-1 flex flex-col min-w-0 pb-20 md:pb-6">
+
+      <div className="flex min-w-0 flex-1 flex-col">
         <StaffHeader />
-        <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+        <main
+          className={cn(
+            "mx-auto w-full max-w-md flex-1 px-4 pt-4 md:max-w-2xl md:px-6 lg:max-w-3xl lg:px-8",
+            // Clears the fixed bottom navigation + home indicator on mobile.
+            "content-safe-bottom md:pb-8"
+          )}
+        >
           {children}
         </main>
       </div>
-      <StaffDrawer />
-      <BottomNav />
+
+      <SideMenu />
+      <BottomNavigation clientSlug={clientId} />
     </div>
   );
 }

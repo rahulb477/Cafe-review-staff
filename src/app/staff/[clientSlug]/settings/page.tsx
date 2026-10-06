@@ -1,17 +1,69 @@
 "use client";
 
 import React, { use } from "react";
-import Link from "next/link";
+import { Check, LogOut, ShieldCheck, Volume2, VolumeX } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
-import {
-  ChevronLeft,
-  Volume2,
-  VolumeX,
-  ShieldCheck,
-  LogOut,
-  Check,
-} from "lucide-react";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { Card, SectionHeading } from "@/components/ui/Card";
+import { CustomerAvatar } from "@/components/ui/CustomerAvatar";
+import { Button } from "@/components/ui/Button";
 
+function SettingRow({
+  icon,
+  title,
+  description,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <span
+          className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-md bg-sand-100 text-espresso-700 [&>svg]:size-[1.1rem]"
+          aria-hidden="true"
+        >
+          {icon}
+        </span>
+        <span className="min-w-0">
+          <span className="block truncate text-[0.84rem] font-bold text-espresso-900">
+            {title}
+          </span>
+          <span className="mt-0.5 block text-[0.72rem] font-medium leading-snug text-espresso-400">
+            {description}
+          </span>
+        </span>
+      </div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+function DetailRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2.5">
+      <span className="shrink-0 text-[0.76rem] font-semibold text-espresso-400">{label}</span>
+      <span
+        className={cn(
+          "min-w-0 truncate text-right text-[0.78rem] font-bold text-espresso-800",
+          mono && "font-mono text-[0.72rem] font-semibold"
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Staff & app settings. Business details are read-only and always come from
+ * staffUsers/{uid}.clientId → clients/{clientId}; there is no way to switch
+ * business from this screen or anywhere else in the app.
+ */
 export default function StaffSettingsPage({
   params,
 }: {
@@ -22,146 +74,129 @@ export default function StaffSettingsPage({
 
   const { client, staffUser, clientId, soundEnabled, setSoundEnabled, logout } = useStaffApp();
 
-  return (
-    <div className="max-w-md mx-auto space-y-5 pb-6 select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/staff/${clientSlug}`}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
-        >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Staff & App Settings
-        </h1>
-        <div className="w-10" />
-      </div>
+  const staffName = staffUser?.name || "Staff Member";
 
-      {/* Staff Profile Card */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs flex items-center gap-4">
-        <div className="w-14 h-14 rounded-full bg-[#3A1E0D] text-[#E6B875] font-bold text-xl flex items-center justify-center shadow-inner shrink-0">
-          {(staffUser?.name || "S").charAt(0)}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-base font-extrabold text-[#3A1E0D] truncate">
-            {staffUser?.name || "Staff Member"}
+  return (
+    <div className="mx-auto w-full max-w-md space-y-5">
+      <ScreenHeader title="Settings" backHref={`/staff/${clientSlug}`} />
+
+      {/* Staff identity */}
+      <Card radius="xl" className="flex items-center gap-3.5 p-4">
+        <CustomerAvatar name={staffName} tint="#e7d8c5" size="lg" />
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[1rem] font-extrabold leading-tight text-espresso-900">
+            {staffName}
           </h2>
-          <p className="text-xs text-stone-500 truncate">{staffUser?.email || "No email available"}</p>
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
-            <span className="px-2 py-0.5 rounded-full bg-[#FAF3EC] text-[#8C5D3B] text-[10px] font-bold border border-[#EBDCCF]">
+          <p className="mt-0.5 truncate text-[0.74rem] font-medium text-espresso-400">
+            {staffUser?.email || "No email available"}
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-xs bg-sand-100 px-2 py-0.5 text-[0.64rem] font-bold text-espresso-600">
               {staffUser?.role || "Staff Member"}
             </span>
-            <span className="text-[10px] text-stone-400 font-mono">
-              UID: {staffUser?.uid?.substring(0, 8) || "N/A"}
-            </span>
+            {staffUser?.staffId && (
+              <span className="font-mono text-[0.64rem] font-semibold text-espresso-300">
+                {staffUser.staffId}
+              </span>
+            )}
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* App Feedback & Sound Setting */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-4">
-        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400">
-          Preferences & Audio
-        </h3>
-
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#FAF6F0] flex items-center justify-center text-[#3A1E0D]">
-              {soundEnabled ? <Volume2 className="w-5 h-5" /> : <VolumeX className="w-5 h-5" />}
-            </div>
-            <div>
-              <div className="font-bold text-xs sm:text-sm text-[#3A1E0D]">Audio Chime Feedback</div>
-              <div className="text-[11px] text-stone-400">Play pleasant harmonic chime on stamp & scan</div>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setSoundEnabled(!soundEnabled)}
-            className={`w-12 h-6 rounded-full transition-colors relative flex items-center p-0.5 cursor-pointer ${
-              soundEnabled ? "bg-[#3A1E0D]" : "bg-stone-300"
-            }`}
+      {/* Preferences */}
+      <section className="space-y-2.5">
+        <SectionHeading title="Preferences" />
+        <Card radius="xl" className="divide-y divide-line-soft px-4 py-1">
+          <SettingRow
+            icon={soundEnabled ? <Volume2 /> : <VolumeX />}
+            title="Audio chime feedback"
+            description="Play a short chime on scan, stamp and reward"
           >
-            <div
-              className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                soundEnabled ? "translate-x-6" : "translate-x-0"
-              }`}
-            />
-          </button>
-        </div>
-      </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={soundEnabled}
+              aria-label="Audio chime feedback"
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              className={cn(
+                "press-scale relative inline-flex h-6 w-11 shrink-0 items-center rounded-full p-0.5",
+                soundEnabled ? "bg-espresso-800" : "bg-sand-300"
+              )}
+            >
+              <span
+                className={cn(
+                  "size-5 rounded-full bg-cream-50 shadow-hairline transition-transform duration-200",
+                  soundEnabled ? "translate-x-5" : "translate-x-0"
+                )}
+              />
+            </button>
+          </SettingRow>
+        </Card>
+      </section>
 
-      {/* Active Client Loyalty Configuration */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-3">
-        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400">
-          Assigned Store & Loyalty Rules
-        </h3>
+      {/* Assigned business + loyalty configuration (read-only) */}
+      <section className="space-y-2.5">
+        <SectionHeading title="Assigned Business" />
+        <Card radius="xl" className="divide-y divide-line-soft px-4 py-1">
+          <DetailRow label="Business" value={client?.name || "Not configured"} />
+          <DetailRow label="Client ID" value={clientId || "Not available"} mono />
+          <DetailRow
+            label="Stamp target"
+            value={client ? `${client.stampTarget} stamps` : "Not configured"}
+          />
+          <DetailRow label="Reward" value={client?.rewardName || "Not configured"} />
+          <DetailRow
+            label="Loyalty programme"
+            value={client ? (client.loyaltyEnabled ? "Enabled" : "Disabled") : "Not available"}
+          />
+        </Card>
+        <p className="px-1 text-[0.7rem] font-medium leading-relaxed text-espresso-300">
+          Your staff account belongs to a single business, resolved from your Firebase staff
+          record. It cannot be switched from the app.
+        </p>
+      </section>
 
-        <div className="divide-y divide-stone-100 text-xs">
-          <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Assigned Business</span>
-            <span className="font-bold text-[#3A1E0D]">{client?.name || "Not configured"}</span>
-          </div>
-          <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Business Client ID</span>
-            <span className="font-mono text-stone-700">{clientId || "Not available"}</span>
-          </div>
-          <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Stamp Target</span>
-            <span className="font-bold text-[#8C5D3B]">
-              {client ? `${client.stampTarget} stamps` : "Not configured"}
-            </span>
-          </div>
-          <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Configured Reward</span>
-            <span className="font-bold text-emerald-800">{client?.rewardName || "Not configured"}</span>
-          </div>
-          <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Loyalty Programme</span>
-            <span className="font-bold text-[#3A1E0D]">
-              {client ? (client.loyaltyEnabled ? "Enabled" : "Disabled") : "Not available"}
-            </span>
-          </div>
-        </div>
-      </div>
+      {/* Security */}
+      <section className="space-y-2.5">
+        <SectionHeading title="Security" />
+        <Card radius="xl" className="space-y-3 p-4">
+          <h3 className="flex items-center gap-1.5 text-[0.8rem] font-bold text-espresso-900">
+            <ShieldCheck className="size-4 text-leaf-600" aria-hidden="true" />
+            Firestore staff isolation
+          </h3>
+          <ul className="space-y-2 text-[0.74rem] font-medium leading-relaxed text-espresso-500">
+            {[
+              <>
+                Authenticated UID resolves to <code className="font-mono">staffUsers/{"{uid}"}</code>{" "}
+                → <code className="font-mono">clientId</code> →{" "}
+                <code className="font-mono">clients/{"{clientId}"}</code>.
+              </>,
+              <>
+                Stamps are stored in{" "}
+                <code className="font-mono">clients/{"{clientId}"}/stampTransactions</code> and
+                redemptions in{" "}
+                <code className="font-mono">clients/{"{clientId}"}/rewardRedemptions</code>.
+              </>,
+              <>
+                Visits are counted in an atomic two-step write with idempotency, so a double tap
+                can never add two stamps.
+              </>,
+              <>
+                QR codes are verified against your business before any customer data is read.
+              </>,
+            ].map((item, index) => (
+              <li key={index} className="flex items-start gap-2">
+                <Check className="mt-0.5 size-3.5 shrink-0 text-leaf-600" aria-hidden="true" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      </section>
 
-      {/* Security & Staff Assignment Rules */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-3">
-        <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
-          <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          <span>Firestore Security & Staff Isolation</span>
-        </h3>
-
-        <div className="space-y-2 text-xs text-stone-600">
-          <div className="flex items-start gap-2">
-            <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span><strong>Firestore Canonical Model:</strong> Authenticated UID resolves to <code>staffUsers/{'{uid}'}</code> → <code>clientId</code> → <code>clients/{'{clientId}'}</code>.</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span><strong>One Staff • One Business:</strong> the assigned business is read from your staff record — it can never be switched from the browser.</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span><strong>Scoped Nested Transactions:</strong> Stamps stored in <code>clients/{'{clientId}'}/stampTransactions</code>.</span>
-          </div>
-          <div className="flex items-start gap-2">
-            <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span><strong>2-Step Visit Counting:</strong> Atomic transactions increment total visits with idempotency safeguards.</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Sign Out Button */}
-      <div className="pt-2">
-        <button
-          onClick={logout}
-          className="w-full py-3.5 bg-red-50 hover:bg-red-100 text-red-700 font-bold text-xs rounded-2xl border border-red-200 transition-colors flex items-center justify-center gap-2 cursor-pointer"
-        >
-          <LogOut className="w-4 h-4" />
-          <span>Sign Out of Staff Session</span>
-        </button>
-      </div>
+      <Button variant="danger" size="lg" block iconLeft={<LogOut />} onClick={() => void logout()}>
+        Sign Out
+      </Button>
     </div>
   );
 }

@@ -1,5 +1,12 @@
 # Staff App — Functionality Fix Report (A–Z)
 
+> **Note (superseded in part).** This report covers the *functionality* pass and states that the
+> UI was deliberately left untouched. The UI has since been redesigned — see
+> [`STAFF-APP-UI-REDESIGN.md`](./STAFF-APP-UI-REDESIGN.md). Everything below about Firebase,
+> authorization, paths, the scanner lifecycle, the two-phase visit write, notifications and the
+> ruleset is still current; only sections **R** and **V**'s "UI preserved" claim and the two
+> matching readiness checks have been replaced by design-system checks.
+
 Repository: `rahulb477/Cafe-review-staff` · branch `arena/99bf539f-cafe-review-staff`
 Firebase project: **`cafe-review7`** (unchanged — no new project, database or auth system)
 Scope: functional fixes only. **No UI redesign** — colours, typography, spacing, cards, buttons,

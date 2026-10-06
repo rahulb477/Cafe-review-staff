@@ -1,37 +1,42 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { Bell, ChevronDown, X } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
-import { StaffNotification } from "@/services/types";
-import { BakedLogoIcon } from "./Icons";
-import { Bell, ChevronDown, Gift, Coffee, Cog, X } from "lucide-react";
+import type { StaffNotification } from "@/services/types";
+import { CafeLogo } from "./Icons";
+import { CustomerAvatar } from "./ui/CustomerAvatar";
+import { NotificationItem } from "./ui/NotificationItem";
+import { LoadingState } from "./ui/LoadingState";
+import { ErrorState } from "./ui/ErrorState";
+import { EmptyState } from "./ui/EmptyState";
 
-function NotificationIcon({ type }: { type: StaffNotification["type"] }) {
-  if (type === "REWARD_READY" || type === "REWARD_REDEEMED") {
-    return <Gift className="w-3.5 h-3.5" />;
-  }
-  if (type === "STAMP_ADDED") {
-    return <Coffee className="w-3.5 h-3.5" />;
-  }
-  return <Cog className="w-3.5 h-3.5" />;
-}
-
+/**
+ * App header (screen 2). Business name, logo and tagline are always read from
+ * clients/{clientId} via the staff session — never hardcoded, never selectable.
+ *
+ * The bell opens the live notification sheet backed by
+ * clients/{clientId}/notifications/{notificationId}; the unread badge and the
+ * mark-as-read write both go to Firestore.
+ */
 export function StaffHeader() {
   const { client, staffUser, clientId, setIsDrawerOpen } = useStaffApp();
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<StaffNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
   const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   const clientSlug = clientId || staffUser?.clientId || client?.slug || "";
   const clientName = client?.name || "Staff Portal";
-  const clientTagline = client?.tagline || "FIREBASE STAFF CONSOLE";
+  const clientTagline = client?.tagline || "Loyalty Programme";
   const staffName = staffUser?.name || "Staff Member";
   const staffRole = staffUser?.role || "Staff Member";
 
-  // Real Firebase notifications for the authenticated staff member's business.
+  // Real-time listener scoped to the authenticated staff member's business.
   useEffect(() => {
     if (!clientId) return;
 
@@ -58,10 +63,34 @@ export function StaffHeader() {
     };
   }, [clientId]);
 
+  // Close the sheet on outside tap / Escape.
+  useEffect(() => {
+    if (!showNotifications) return;
+
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      if (panelRef.current && !panelRef.current.contains(event.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setShowNotifications(false);
+    };
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [showNotifications]);
+
   const unreadCount = notifications.filter((item) => !item.read).length;
 
   const handleNotificationClick = async (notification: StaffNotification) => {
     if (notification.read) return;
+    // Optimistic; a failed write is tolerated and the listener re-syncs.
     setNotifications((current) =>
       current.map((item) => (item.id === notification.id ? { ...item, read: true } : item))
     );
@@ -74,115 +103,149 @@ export function StaffHeader() {
 
   return (
     <>
-      <header className="sticky top-0 z-30 bg-[#FDFBF7]/95 backdrop-blur-md border-b border-[#EBDCCF]/60 px-4 py-3 flex items-center justify-between shadow-xs">
-        <Link href={`/staff/${clientSlug}`} className="flex items-center gap-2.5 group">
-          <BakedLogoIcon className="w-8 h-8 group-hover:scale-105 transition-transform" />
-          <div className="flex flex-col">
-            <span className="font-extrabold text-sm tracking-wide text-[#3A1E0D] leading-tight">
-              {clientName}
-            </span>
-            <span className="text-[9px] font-semibold tracking-wider text-[#A0704C] uppercase">
-              {clientTagline}
-            </span>
-          </div>
-        </Link>
-
-        <div className="flex items-center gap-2 sm:gap-3">
-          <button
-            onClick={() => setShowNotifications(!showNotifications)}
-            className="relative p-2 rounded-full text-[#4A2810] hover:bg-[#F3E7DC] transition-colors focus:outline-none focus:ring-2 focus:ring-[#B97B32]/30"
-            aria-label={
-              unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"
-            }
+      <header
+        className={cn(
+          "sticky top-0 z-30 border-b border-line bg-cream-100/95 backdrop-blur-md",
+          "pt-safe shadow-hairline"
+        )}
+      >
+        <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3 px-4 py-2.5 sm:px-6">
+          <Link
+            href={`/staff/${clientSlug}`}
+            className="press-scale flex min-w-0 items-center gap-2.5"
+            aria-label={`${clientName} dashboard`}
           >
-            <Bell className="w-5 h-5" />
-            {unreadCount > 0 && (
-              <span className="absolute top-0.5 right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#B97B32] text-white text-[9px] font-bold flex items-center justify-center">
-                {unreadCount > 9 ? "9+" : unreadCount}
+            <CafeLogo
+              name={clientName}
+              logoUrl={client?.logoUrl}
+              logoText={client?.logoText}
+              className="size-9 shrink-0"
+            />
+            <span className="min-w-0">
+              <span className="block truncate text-[0.9rem] font-extrabold leading-tight tracking-tight text-espresso-900">
+                {clientName}
               </span>
-            )}
-          </button>
+              <span className="mt-0.5 block truncate text-[0.62rem] font-bold uppercase tracking-[0.11em] text-espresso-400">
+                {clientTagline}
+              </span>
+            </span>
+          </Link>
 
-          <button
-            onClick={() => setIsDrawerOpen(true)}
-            className="flex items-center gap-1.5 pl-1.5 pr-2 py-1 rounded-full bg-[#F5EBE0] hover:bg-[#ECD8C8] border border-[#DFC8B4] transition-all group focus:outline-none focus:ring-2 focus:ring-[#B97B32]/30"
-            aria-label="Open staff menu"
-          >
-            <div className="w-7 h-7 rounded-full bg-[#3A1E0D] text-[#FDFBF7] font-bold text-xs flex items-center justify-center shadow-xs">
-              {staffName.charAt(0)}
-            </div>
-            <div className="hidden xs:flex flex-col text-left">
-              <span className="text-xs font-semibold text-[#3A1E0D] leading-none flex items-center gap-0.5">
-                {staffName}
-                <ChevronDown className="w-3 h-3 text-[#8C5D3B] group-hover:translate-y-0.5 transition-transform" />
-              </span>
-              <span className="text-[9px] text-[#8C5D3B] font-medium leading-none mt-0.5">
-                {staffRole}
-              </span>
-            </div>
-          </button>
-        </div>
-      </header>
+          <div className="flex shrink-0 items-center gap-1.5 sm:gap-2.5">
+            <div className="relative" ref={panelRef}>
+              <button
+                type="button"
+                onClick={() => setShowNotifications((open) => !open)}
+                aria-label={
+                  unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"
+                }
+                aria-expanded={showNotifications}
+                className={cn(
+                  "press-scale relative inline-flex size-10 items-center justify-center rounded-full",
+                  "border border-line bg-cream-50 text-espresso-700 shadow-hairline",
+                  "hover:bg-sand-100",
+                  showNotifications && "bg-sand-100"
+                )}
+              >
+                <Bell className="size-[1.15rem]" strokeWidth={2} aria-hidden="true" />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 flex h-[1.05rem] min-w-[1.05rem] items-center justify-center rounded-full border-2 border-cream-100 bg-caramel-500 px-1 text-[0.58rem] font-extrabold text-cream-50 tabular-nums">
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </button>
 
-      {showNotifications && (
-        <div
-          role="region"
-          aria-label="Notifications Panel"
-          className="fixed top-14 right-4 z-50 w-80 bg-white rounded-2xl shadow-2xl border border-[#EBDCCF] p-3 animate-in fade-in zoom-in-95 duration-200"
-        >
-          <div className="flex items-center justify-between pb-2 mb-2 border-b border-stone-100">
-            <span className="text-xs font-bold text-[#3A1E0D]">Staff Notifications</span>
+              {showNotifications && (
+                <div
+                  role="dialog"
+                  aria-label="Staff notifications"
+                  className={cn(
+                    "animate-rise z-50 overflow-hidden rounded-xl border border-line bg-cream-50 shadow-raise",
+                    // Mobile: a fixed sheet under the header, inset from both
+                    // edges so it can never overflow a 320px viewport.
+                    "fixed inset-x-3 top-[calc(env(safe-area-inset-top,0px)+4.25rem)]",
+                    // From sm up: a dropdown anchored to the bell.
+                    "sm:absolute sm:inset-x-auto sm:top-full sm:right-0 sm:mt-2 sm:w-[20rem]"
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-2 border-b border-line-soft bg-cream-100 px-3.5 py-2.5">
+                    <div className="min-w-0">
+                      <p className="truncate text-[0.8rem] font-bold text-espresso-900">
+                        Notifications
+                      </p>
+                      <p className="truncate text-[0.66rem] font-medium text-espresso-400">
+                        {unreadCount > 0
+                          ? `${unreadCount} unread · ${clientName}`
+                          : `All caught up · ${clientName}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowNotifications(false)}
+                      aria-label="Close notifications"
+                      className="press-scale inline-flex size-7 shrink-0 items-center justify-center rounded-full text-espresso-400 hover:bg-sand-100 hover:text-espresso-800"
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <div className="max-h-[19rem] overflow-y-auto overscroll-contain p-1.5">
+                    {notificationsLoading ? (
+                      <LoadingState compact label="Loading notifications…" />
+                    ) : notificationsError ? (
+                      <ErrorState inline message={notificationsError} className="m-1.5" />
+                    ) : notifications.length === 0 ? (
+                      <EmptyState
+                        bare
+                        icon={<Bell />}
+                        title="No notifications yet"
+                        message="Stamps, unlocks and redemptions for this business will appear here."
+                      />
+                    ) : (
+                      <ul className="space-y-0.5">
+                        {notifications.map((notification) => (
+                          <NotificationItem
+                            key={notification.id}
+                            notification={notification}
+                            onSelect={(item) => void handleNotificationClick(item)}
+                          />
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
-              onClick={() => setShowNotifications(false)}
-              className="text-stone-400 hover:text-stone-600 p-1"
-              aria-label="Close notifications"
+              type="button"
+              onClick={() => setIsDrawerOpen(true)}
+              aria-label="Open staff menu"
+              aria-haspopup="dialog"
+              className={cn(
+                "press-scale flex items-center gap-2 rounded-full border border-line bg-cream-50",
+                "py-1 pr-2.5 pl-1 shadow-hairline hover:bg-sand-100"
+              )}
             >
-              <X className="w-4 h-4" />
+              <CustomerAvatar name={staffName} tint="#e7d8c5" size="sm" />
+              <span className="hidden min-w-0 text-left xs:block">
+                <span className="flex items-center gap-0.5">
+                  <span className="max-w-[7.5rem] truncate text-[0.74rem] font-bold leading-none text-espresso-900">
+                    {staffName}
+                  </span>
+                  <ChevronDown className="size-3 shrink-0 text-espresso-400" aria-hidden="true" />
+                </span>
+                <span className="mt-1 block truncate text-[0.62rem] font-semibold leading-none text-espresso-400">
+                  {staffRole}
+                </span>
+              </span>
+              <span className="xs:hidden">
+                <ChevronDown className="size-3.5 text-espresso-400" aria-hidden="true" />
+              </span>
             </button>
           </div>
-
-          {notificationsLoading ? (
-            <p className="px-2 py-4 text-center text-xs text-stone-400">Loading notifications...</p>
-          ) : notificationsError ? (
-            <p className="px-2 py-4 text-center text-xs text-red-600">{notificationsError}</p>
-          ) : notifications.length === 0 ? (
-            <p className="px-2 py-4 text-center text-xs text-stone-400">No new notifications.</p>
-          ) : (
-            <div className="max-h-72 overflow-y-auto space-y-1">
-              {notifications.map((notification) => (
-                <button
-                  key={notification.id}
-                  type="button"
-                  onClick={() => void handleNotificationClick(notification)}
-                  className={`w-full text-left flex items-start gap-2 rounded-xl px-2 py-2 transition-colors cursor-pointer ${
-                    notification.read ? "hover:bg-[#FAF7F2]" : "bg-[#FFF8F0] hover:bg-[#F7EDE2]"
-                  }`}
-                >
-                  <span className="mt-0.5 w-6 h-6 rounded-lg bg-[#FAF3EC] text-[#8C5D3B] flex items-center justify-center shrink-0">
-                    <NotificationIcon type={notification.type} />
-                  </span>
-                  <span className="flex-1 min-w-0">
-                    <span className="flex items-center gap-1.5">
-                      <span className="text-xs font-bold text-[#3A1E0D] truncate">
-                        {notification.title}
-                      </span>
-                      {!notification.read && (
-                        <span className="w-1.5 h-1.5 rounded-full bg-[#B97B32] shrink-0" />
-                      )}
-                    </span>
-                    <span className="block text-[11px] text-stone-500 break-words">
-                      {notification.message}
-                    </span>
-                    <span className="block text-[10px] text-stone-400 mt-0.5">
-                      {notification.createdAt || "Just now"}
-                    </span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
         </div>
-      )}
+      </header>
     </>
   );
 }

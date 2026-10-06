@@ -1,31 +1,77 @@
 "use client";
 
-import React, { useEffect, useState, use } from "react";
+import React, { useCallback, useEffect, useMemo, useState, use } from "react";
 import Link from "next/link";
+import {
+  ChevronRight,
+  Clock,
+  Coffee,
+  Gift,
+  History,
+  Plus,
+  QrCode,
+  Search,
+  Star,
+  Users,
+} from "lucide-react";
+import { cn } from "@/lib/cn";
+import { formatDayLabel, greetingForDate, stampFraction } from "@/lib/format";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
   describeErrorForDiagnostics,
-  StaffServiceError,
   toStaffServiceError,
 } from "@/services/staffErrors";
-import {
-  QrCode,
-  Plus,
-  Search,
-  History,
-  Users,
-  Star,
-  Gift,
-  Coffee,
-  ChevronRight,
-  ShieldCheck,
-  CheckCircle,
-  AlertCircle,
-  Loader2,
-} from "lucide-react";
-import { DashboardStats, CustomerProfile } from "@/services/types";
+import type {
+  CustomerProfile,
+  DashboardStats,
+  StaffActivityItem,
+} from "@/services/types";
+import { Card, SectionHeading } from "@/components/ui/Card";
+import { StatCard } from "@/components/ui/StatCard";
+import { QuickAction } from "@/components/ui/QuickAction";
+import { ActivityItem } from "@/components/ui/ActivityItem";
+import { CustomerAvatar } from "@/components/ui/CustomerAvatar";
+import { Button } from "@/components/ui/Button";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { Sheet } from "@/components/ui/Sheet";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingState } from "@/components/ui/LoadingState";
+import { CoffeeCupIllustration } from "@/components/Icons";
 
+const EMPTY_STATS: DashboardStats = {
+  todayStamps: 0,
+  todayCustomers: 0,
+  todayReviews: 0,
+  rewardsRedeemed: 0,
+  reviewsAvailable: true,
+  customersAvailable: true,
+};
+
+const MANUAL_DIRECTORY_LIMIT = 20;
+const TODAY_ACTIVITY_LIMIT = 4;
+
+function isToday(isoTimestamp: string | undefined, today: Date | null): boolean {
+  if (!isoTimestamp || !today) return false;
+  const millis = Date.parse(isoTimestamp);
+  if (Number.isNaN(millis)) return false;
+  const stamp = new Date(millis);
+  return (
+    stamp.getFullYear() === today.getFullYear() &&
+    stamp.getMonth() === today.getMonth() &&
+    stamp.getDate() === today.getDate()
+  );
+}
+
+/**
+ * Screen 2 — Staff Dashboard.
+ *
+ * Every number on this screen is a live, business-scoped Firestore value
+ * (clients/{clientId}/stampTransactions, customers, reviews,
+ * rewardRedemptions). Nothing is hardcoded; an unreadable metric renders "—"
+ * and an empty ledger renders an honest empty state.
+ */
 export default function StaffDashboardPage({
   params,
 }: {
@@ -35,48 +81,58 @@ export default function StaffDashboardPage({
   const clientSlug = resolvedParams.clientSlug;
 
   const { client, staffUser, clientId, playChime } = useStaffApp();
-  const [stats, setStats] = useState<DashboardStats>({
-    todayStamps: 0,
-    todayCustomers: 0,
-    todayReviews: 0,
-    rewardsRedeemed: 0,
-    reviewsAvailable: true,
-    customersAvailable: true,
-  });
-  const [recentCustomers, setRecentCustomers] = useState<CustomerProfile[]>([]);
+
+  const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS);
   const [isStatsLoading, setIsStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState<string | null>(null);
-  const [isCustomersLoading, setIsCustomersLoading] = useState(true);
-  const [customersError, setCustomersError] = useState<string | null>(null);
 
-  // Manual stamp modal
-  const [showManualModal, setShowManualModal] = useState(false);
-  const [manualSuccessMsg, setManualSuccessMsg] = useState("");
+  const [activities, setActivities] = useState<StaffActivityItem[]>([]);
+  const [isActivityLoading, setIsActivityLoading] = useState(true);
+
+  const [directory, setDirectory] = useState<CustomerProfile[]>([]);
+  const [isDirectoryLoading, setIsDirectoryLoading] = useState(false);
+  const [directoryLoaded, setDirectoryLoaded] = useState(false);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+
+  // Manual stamp flow (dashboard shortcut → the same addStamp write).
+  const [isManualOpen, setIsManualOpen] = useState(false);
+  const [manualTarget, setManualTarget] = useState<CustomerProfile | null>(null);
   const [isSubmittingManual, setIsSubmittingManual] = useState(false);
+  const [manualMessage, setManualMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
+    null
+  );
+
+  // Resolved after mount (deferred a tick) so the time-aware greeting and the
+  // date line can never mismatch the server render, and the effect body never
+  // calls setState synchronously.
+  const [today, setToday] = useState<Date | null>(null);
+  useEffect(() => {
+    const handle = window.setTimeout(() => setToday(new Date()), 0);
+    return () => window.clearTimeout(handle);
+  }, []);
 
   const staffName = staffUser?.name || "Staff Member";
+  const greeting = today ? `${greetingForDate(today)}, ${staffName}.` : "\u00a0";
+  const dateLabel = today ? formatDayLabel(today) : "\u00a0";
 
-  // Formatted date
-  const todayFormatted = new Intl.DateTimeFormat("en-US", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-  }).format(new Date());
+  const todaysActivity = useMemo(
+    () => activities.filter((item) => isToday(item.timestamp, today)).slice(0, TODAY_ACTIVITY_LIMIT),
+    [activities, today]
+  );
 
-  // Live Firestore dashboard metrics + the assigned business's customers.
-  // Every query is scoped to the canonical clientId from the staff session.
+  /* ---------------- live Firestore metrics + activity ---------------- */
   useEffect(() => {
     if (!clientId) return;
     let active = true;
 
-    const unsubStats = FirebaseService.listenToDashboardStats(
+    const unsubscribeStats = FirebaseService.listenToDashboardStats(
       (liveStats) => {
         if (!active) return;
         setStats(liveStats);
         setIsStatsLoading(false);
         setStatsError(null);
       },
-      (error: StaffServiceError) => {
+      (error) => {
         if (!active) return;
         console.warn("[dashboard] stats notice:", describeErrorForDiagnostics(error));
         setStatsError(error.message);
@@ -84,382 +140,351 @@ export default function StaffDashboardPage({
       }
     );
 
-    FirebaseService.getCustomers()
-      .then((customers) => {
+    const unsubscribeActivity = FirebaseService.listenToRecentActivity(
+      (items) => {
         if (!active) return;
-        setRecentCustomers(customers.slice(0, 5));
-        setCustomersError(null);
-      })
-      .catch((error: unknown) => {
-        const staffErr = toStaffServiceError(error);
-        console.warn("[dashboard] customer list notice:", describeErrorForDiagnostics(staffErr));
+        setActivities(items);
+        setIsActivityLoading(false);
+      },
+      (error) => {
         if (!active) return;
-        setCustomersError(staffErr.message);
-      })
-      .finally(() => {
-        if (active) setIsCustomersLoading(false);
-      });
+        console.warn("[dashboard] activity notice:", describeErrorForDiagnostics(error));
+        setIsActivityLoading(false);
+      }
+    );
 
     return () => {
       active = false;
-      unsubStats();
+      unsubscribeStats();
+      unsubscribeActivity();
     };
   }, [clientId]);
 
-  const handleManualQuickStamp = async (customer: CustomerProfile) => {
-    if (!staffUser || isSubmittingManual) return;
-    setIsSubmittingManual(true);
-    setManualSuccessMsg("");
+  /* ---------------- customer directory (manual stamp picker) ---------------- */
+  const loadDirectory = useCallback(async () => {
+    if (!clientId) return;
+    setIsDirectoryLoading(true);
     try {
-      const res = await FirebaseService.addStamp(
-        customer.id,
+      const customers = await FirebaseService.getCustomers({ limit: MANUAL_DIRECTORY_LIMIT });
+      setDirectory(customers);
+      setDirectoryLoaded(true);
+      setDirectoryError(null);
+    } catch (error: unknown) {
+      const staffError = toStaffServiceError(error);
+      console.warn("[dashboard] directory notice:", describeErrorForDiagnostics(staffError));
+      setDirectory([]);
+      setDirectoryError(staffError.message);
+    } finally {
+      setIsDirectoryLoading(false);
+    }
+  }, [clientId]);
+
+  /* ---------------- manual stamp ---------------- */
+  // The directory is read on demand: opening the picker is the only thing that
+  // needs it, so the dashboard never issues a Firestore read it may not use.
+  const openManualFlow = () => {
+    setManualMessage(null);
+    setIsManualOpen(true);
+    if (!directoryLoaded || directoryError) void loadDirectory();
+  };
+
+  const confirmManualStamp = async () => {
+    const target = manualTarget;
+    if (!target || !staffUser || isSubmittingManual) return;
+
+    setIsSubmittingManual(true);
+    setManualMessage(null);
+
+    try {
+      const result = await FirebaseService.addStamp(
+        target.id,
         undefined,
         "Manual stamp from dashboard"
       );
 
-      if (res.success) {
-        playChime(res.rewardUnlocked ? "reward" : "stamp");
-        setManualSuccessMsg(`Stamp added to ${customer.name}'s account!`);
-        const updated = await FirebaseService.getCustomers();
-        setRecentCustomers(updated.slice(0, 5));
-        setCustomersError(null);
-        setTimeout(() => {
-          setManualSuccessMsg("");
-          setShowManualModal(false);
-        }, 1500);
+      if (result.success) {
+        playChime(result.rewardUnlocked ? "reward" : "stamp");
+        setManualMessage({
+          tone: "ok",
+          text: result.rewardUnlocked
+            ? `${target.name} reached ${stampFraction(result.newStamps, result.stampTarget)} — ${result.rewardName} is ready to redeem.`
+            : `Stamp added. ${target.name} now has ${stampFraction(result.newStamps, result.stampTarget)} stamps.`,
+        });
+        await loadDirectory();
+        // Let the confirmation be read, then close the picker.
+        window.setTimeout(() => {
+          setManualMessage(null);
+          setIsManualOpen(false);
+        }, 1800);
       }
     } catch (error: unknown) {
-      const staffErr = toStaffServiceError(error);
-      console.error("[dashboard] manual stamp failed:", describeErrorForDiagnostics(staffErr));
+      const staffError = toStaffServiceError(error);
+      console.error("[dashboard] manual stamp failed:", describeErrorForDiagnostics(staffError));
       playChime("error");
-      setManualSuccessMsg(staffErr.message);
+      setManualMessage({ tone: "error", text: staffError.message });
     } finally {
       setIsSubmittingManual(false);
     }
   };
 
   return (
-    <div className="space-y-6 pb-6 select-none">
-      {/* Top Greeting & Date (Screen 2) */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl sm:text-2xl font-extrabold text-[#3A1E0D] tracking-tight">
-            Staff Dashboard
-          </h1>
-          <p className="text-xs sm:text-sm text-stone-500 font-medium mt-0.5">
-            Good morning, {staffName}!
-          </p>
-        </div>
-        <div className="px-3 py-1.5 rounded-full bg-[#EFE4D6] border border-[#DECDBE] text-[11px] sm:text-xs font-bold text-[#6D4224] shadow-xs">
-          {todayFormatted}
-        </div>
-      </div>
+    <div className="space-y-6">
+      {/* ---------------- Greeting ---------------- */}
+      <section className="pt-1">
+        <h1 className="text-[1.4rem] leading-tight font-extrabold tracking-tight text-espresso-900">
+          {greeting}
+        </h1>
+        <p className="mt-1 flex items-center gap-1.5 text-[0.76rem] font-semibold text-espresso-400">
+          <Clock className="size-3.5" aria-hidden="true" />
+          <span>{dateLabel}</span>
+          {client?.name && (
+            <>
+              <span aria-hidden="true">·</span>
+              <span className="truncate">{client.name}</span>
+            </>
+          )}
+        </p>
+      </section>
 
-      {/* 4 Stats Cards (Screen 2 2x2 Grid) */}
-      <div className="grid grid-cols-2 gap-3 sm:gap-4">
-        {/* Card 1: Today's Stamps */}
-        <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
-          <div>
-            <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {isStatsLoading ? "…" : stats.todayStamps}
-            </div>
-            <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
-              Today&apos;s Stamps
-            </div>
-          </div>
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-[#FFEDD5] text-[#C2410C] flex items-center justify-center shrink-0 shadow-inner">
-            <Coffee className="w-6 h-6 stroke-[2.2]" />
-          </div>
-        </div>
-
-        {/* Card 2: Customers */}
-        <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
-          <div>
-            <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {isStatsLoading ? "…" : stats.customersAvailable ? stats.todayCustomers : "—"}
-            </div>
-            <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
-              Total Customers
-            </div>
-          </div>
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-[#DCFCE7] text-[#15803D] flex items-center justify-center shrink-0 shadow-inner">
-            <Users className="w-6 h-6 stroke-[2.2]" />
-          </div>
-        </div>
-
-        {/* Card 3: Reviews */}
-        <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
-          <div>
-            <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {isStatsLoading ? "…" : stats.reviewsAvailable ? stats.todayReviews : "—"}
-            </div>
-            <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
-              Reviews
-            </div>
-          </div>
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-[#FEF3C7] text-[#B45309] flex items-center justify-center shrink-0 shadow-inner">
-            <Star className="w-6 h-6 stroke-[2.2] fill-[#F59E0B]" />
-          </div>
+      {/* ---------------- Main stats ---------------- */}
+      <section aria-label="Today's metrics" className="space-y-2.5">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 sm:gap-3">
+          <StatCard
+            label="Today's Stamps"
+            caption="since midnight"
+            value={stats.todayStamps}
+            icon={Coffee}
+            tone="clay"
+            loading={isStatsLoading}
+          />
+          <StatCard
+            label="Customers"
+            caption="new today"
+            value={stats.customersAvailable ? stats.todayCustomers : "—"}
+            icon={Users}
+            tone="leaf"
+            loading={isStatsLoading}
+          />
+          <StatCard
+            label="Reviews"
+            caption="total"
+            value={stats.reviewsAvailable ? stats.todayReviews : "—"}
+            icon={Star}
+            tone="caramel"
+            loading={isStatsLoading}
+          />
+          <StatCard
+            label="Rewards Redeemed"
+            caption="total"
+            value={stats.rewardsRedeemed}
+            icon={Gift}
+            tone="espresso"
+            loading={isStatsLoading}
+          />
         </div>
 
-        {/* Card 4: Rewards Redeemed */}
-        <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
-          <div>
-            <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {isStatsLoading ? "…" : stats.rewardsRedeemed}
-            </div>
-            <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
-              Rewards Redeemed
-            </div>
-          </div>
-          <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-2xl bg-[#FCE7F3] text-[#BE185D] flex items-center justify-center shrink-0 shadow-inner">
-            <Gift className="w-6 h-6 stroke-[2.2]" />
-          </div>
-        </div>
-      </div>
+        {statsError && <ErrorState inline message={statsError} />}
+      </section>
 
-      {/* Firestore error state — a real failure is never rendered as a zero */}
-      {(statsError || customersError) && (
-        <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span className="flex-1">{statsError || customersError}</span>
-        </div>
-      )}
-
-      {/* Quick Actions Header (Screen 2) */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-bold tracking-wide text-[#3A1E0D] uppercase px-1">
-          Quick Actions
-        </h2>
+      {/* ---------------- Quick actions ---------------- */}
+      <section aria-labelledby="quick-actions" className="space-y-2.5">
+        <SectionHeading id="quick-actions" title="Quick Actions" />
 
         <div className="space-y-2.5">
-          {/* Action 1: Scan Customer QR */}
-          <Link
+          <QuickAction
+            accent
+            icon={QrCode}
+            title="Scan Customer QR"
+            description="Scan a customer's loyalty QR"
             href={`/staff/${clientSlug}/scan`}
-            className="flex items-center justify-between p-4 bg-white rounded-2xl border border-[#EBDCCF] hover:border-[#3A1E0D] hover:shadow-md transition-all group"
-          >
-            <div className="flex items-center gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-[#3A1E0D] text-[#E6B875] flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <QrCode className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-[#3A1E0D] group-hover:text-[#200F05]">
-                  Scan Customer QR
-                </div>
-                <div className="text-xs text-stone-500">
-                  Scan pass with camera to add stamp or redeem reward
-                </div>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-stone-400 group-hover:text-[#3A1E0D] group-hover:translate-x-0.5 transition-all" />
-          </Link>
-
-          {/* Action 2: Add Stamp Manually */}
-          <button
-            type="button"
-            onClick={() => setShowManualModal(true)}
-            className="w-full text-left flex items-center justify-between p-4 bg-white rounded-2xl border border-[#EBDCCF] hover:border-[#3A1E0D] hover:shadow-md transition-all group cursor-pointer"
-          >
-            <div className="flex items-center gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-[#F3E7DC] text-[#3A1E0D] flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <Plus className="w-5 h-5 stroke-[2.5]" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-[#3A1E0D] group-hover:text-[#200F05]">
-                  Add Stamp Manually
-                </div>
-                <div className="text-xs text-stone-500">
-                  Lookup by customer name or table number
-                </div>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-stone-400 group-hover:text-[#3A1E0D] group-hover:translate-x-0.5 transition-all" />
-          </button>
-
-          {/* Action 3: Customer Lookup */}
-          <Link
+          />
+          <QuickAction
+            icon={Plus}
+            title="Add Stamp Manually"
+            description="Find a customer and add a stamp"
+            onClick={openManualFlow}
+          />
+          <QuickAction
+            icon={Search}
+            title="Customer Lookup"
+            description="Search existing customers"
             href={`/staff/${clientSlug}/customers`}
-            className="flex items-center justify-between p-4 bg-white rounded-2xl border border-[#EBDCCF] hover:border-[#3A1E0D] hover:shadow-md transition-all group"
-          >
-            <div className="flex items-center gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-[#F3E7DC] text-[#3A1E0D] flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <Search className="w-5 h-5 stroke-[2.2]" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-[#3A1E0D] group-hover:text-[#200F05]">
-                  Customer Lookup
-                </div>
-                <div className="text-xs text-stone-500">
-                  Search directory, view stamp history & rewards
-                </div>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-stone-400 group-hover:text-[#3A1E0D] group-hover:translate-x-0.5 transition-all" />
-          </Link>
-
-          {/* Action 4: Recent Activity */}
-          <Link
+          />
+          <QuickAction
+            icon={History}
+            title="Recent Activity"
+            description="View today's staff activity"
             href={`/staff/${clientSlug}/activity`}
-            className="flex items-center justify-between p-4 bg-white rounded-2xl border border-[#EBDCCF] hover:border-[#3A1E0D] hover:shadow-md transition-all group"
-          >
-            <div className="flex items-center gap-3.5">
-              <div className="w-10 h-10 rounded-xl bg-[#F3E7DC] text-[#3A1E0D] flex items-center justify-center shadow-xs group-hover:scale-105 transition-transform">
-                <History className="w-5 h-5 stroke-[2.2]" />
-              </div>
-              <div>
-                <div className="text-sm font-bold text-[#3A1E0D] group-hover:text-[#200F05]">
-                  Recent Activity
-                </div>
-                <div className="text-xs text-stone-500">
-                  View full chronological staff audit logs
-                </div>
-              </div>
+          />
+        </div>
+      </section>
+
+      {/* ---------------- Today's activity ---------------- */}
+      <section aria-labelledby="todays-activity" className="space-y-2.5">
+        <SectionHeading
+          id="todays-activity"
+          title="Today's Activity"
+          action={
+            <Link
+              href={`/staff/${clientSlug}/activity`}
+              className="press-scale inline-flex items-center gap-0.5 text-[0.72rem] font-bold text-espresso-500 hover:text-espresso-800"
+            >
+              View all
+              <ChevronRight className="size-3.5" aria-hidden="true" />
+            </Link>
+          }
+        />
+
+        <Card radius="xl" flush className="overflow-hidden">
+          {isActivityLoading ? (
+            <LoadingState compact label="Loading today's activity…" />
+          ) : todaysActivity.length === 0 ? (
+            <EmptyState
+              bare
+              icon={<Clock />}
+              title="No activity yet today"
+              message={
+                today
+                  ? `Stamps and redemptions for ${client?.name ?? "this business"} will appear here as they happen.`
+                  : "Stamps and redemptions will appear here as they happen."
+              }
+            />
+          ) : (
+            <ul className="divide-y divide-line-soft p-1.5">
+              {todaysActivity.map((item) => (
+                <ActivityItem
+                  key={item.id}
+                  activity={item}
+                  compact
+                  customerHref={
+                    item.customerId
+                      ? `/staff/${clientSlug}/customers/${item.customerId}`
+                      : undefined
+                  }
+                />
+              ))}
+            </ul>
+          )}
+        </Card>
+      </section>
+
+      {/* ---------------- Manual stamp picker ---------------- */}
+      <Sheet
+        open={isManualOpen}
+        title="Add Stamp Manually"
+        subtitle="Select a customer from this business"
+        onClose={() => {
+          if (isSubmittingManual) return;
+          setIsManualOpen(false);
+          setManualTarget(null);
+        }}
+      >
+        <div className="space-y-3">
+          {manualMessage && (
+            <div
+              role="status"
+              className={cn(
+                "flex items-start gap-2 rounded-lg border p-3",
+                manualMessage.tone === "ok"
+                  ? "border-leaf-200 bg-leaf-50 text-leaf-700"
+                  : "border-alert-100 bg-alert-50 text-alert-700"
+              )}
+            >
+              <span className="min-w-0 flex-1 text-[0.76rem] font-semibold leading-relaxed">
+                {manualMessage.text}
+              </span>
             </div>
-            <ChevronRight className="w-5 h-5 text-stone-400 group-hover:text-[#3A1E0D] group-hover:translate-x-0.5 transition-all" />
-          </Link>
-        </div>
-      </div>
+          )}
 
-      {/* Live Recent Customers Section */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400">
-            Registered Store Customers ({recentCustomers.length})
-          </h3>
-          <Link
-            href={`/staff/${clientSlug}/customers`}
-            className="text-xs font-bold text-[#8C5D3B] hover:text-[#3A1E0D] flex items-center gap-1"
-          >
-            <span>View All</span>
-            <ChevronRight className="w-3.5 h-3.5" />
-          </Link>
-        </div>
-
-        {isCustomersLoading ? (
-          <div className="py-6 text-center text-stone-400">
-            <Loader2 className="w-6 h-6 mx-auto mb-1 animate-spin text-[#3A1E0D]" />
-            <p className="text-xs">Loading customers from Firestore...</p>
-          </div>
-        ) : recentCustomers.length === 0 ? (
-          <div className="py-6 text-center text-stone-400">
-            <Users className="w-8 h-8 mx-auto mb-1 text-stone-300" />
-            <p className="text-xs">No customer profiles registered yet for this store.</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-stone-100">
-            {recentCustomers.map((cust) => (
-              <Link
-                key={cust.id}
-                href={`/staff/${clientSlug}/customers/${cust.id}`}
-                className="py-2.5 flex items-center justify-between hover:bg-stone-50 px-2 rounded-xl transition-colors group"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs text-[#3A1E0D]"
-                    style={{ backgroundColor: cust.avatarBg }}
+          {directoryError ? (
+            <ErrorState inline message={directoryError} onRetry={() => void loadDirectory()} />
+          ) : isDirectoryLoading ? (
+            <LoadingState rows={3} label="Loading customers…" />
+          ) : directory.length === 0 ? (
+            <EmptyState
+              bare
+              icon={<Users />}
+              title="No customers yet"
+              message="Customers appear here once they register with this business."
+              action={
+                <Button size="sm" variant="secondary" onClick={() => void loadDirectory()}>
+                  Refresh
+                </Button>
+              }
+            />
+          ) : (
+            <ul className="space-y-2">
+              {directory.map((customer) => (
+                <li key={customer.id}>
+                  <button
+                    type="button"
+                    disabled={isSubmittingManual}
+                    onClick={() => setManualTarget(customer)}
+                    className={cn(
+                      "press-scale flex w-full items-center gap-3 rounded-lg border border-line",
+                      "bg-cream-100 p-3 text-left hover:border-espresso-200 hover:bg-sand-100",
+                      "disabled:cursor-not-allowed disabled:opacity-60"
+                    )}
                   >
-                    {cust.avatarInitial}
-                  </div>
-                  <div>
-                    <div className="font-bold text-xs text-[#3A1E0D] group-hover:text-[#2A1408]">
-                      {cust.name}
-                    </div>
-                    <div className="text-[10px] text-stone-400">
-                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Table not provided"}
-                    </div>
-                  </div>
-                </div>
+                    <CustomerAvatar name={customer.name} tint={customer.avatarBg} size="md" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[0.85rem] font-bold text-espresso-900">
+                        {customer.name}
+                      </span>
+                      <span className="mt-0.5 block truncate text-[0.7rem] font-medium text-espresso-300">
+                        #{customer.customerCode || customer.id.substring(0, 6)} ·{" "}
+                        {stampFraction(customer.stamps, customer.stampTarget)}
+                      </span>
+                    </span>
+                    <ChevronRight className="size-4 shrink-0 text-espresso-300" aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </Sheet>
 
-                <div className="text-right flex items-center gap-2">
-                  <div className="px-2.5 py-1 rounded-full bg-[#FAF4ED] text-[#4A2810] font-bold text-xs border border-[#E8DCCF]">
-                    {cust.stamps} / {cust.stampTarget}
-                  </div>
-                  {cust.isEligibleForReward && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+      {/* ---------------- Manual stamp confirmation (screen 5) ---------------- */}
+      <ConfirmModal
+        open={Boolean(manualTarget)}
+        title="Add 1 Loyalty Stamp?"
+        description={
+          manualTarget ? (
+            <>
+              This adds one stamp to{" "}
+              <span className="font-bold text-espresso-800">{manualTarget.name}</span>&apos;s loyalty
+              account.
+            </>
+          ) : undefined
+        }
+        hero={<CoffeeCupIllustration className="size-20" />}
+        confirmLabel="Confirm"
+        submitting={isSubmittingManual}
+        onConfirm={() => void confirmManualStamp()}
+        onCancel={() => {
+          if (isSubmittingManual) return;
+          setManualTarget(null);
+        }}
+      >
+        {manualTarget && (
+          <div className="rounded-lg border border-line bg-cream-100 p-3">
+            <div className="flex items-center justify-between gap-3 text-[0.76rem] font-semibold text-espresso-500">
+              <span>Stamp count</span>
+              <span className="tabular-nums text-espresso-900">
+                {stampFraction(manualTarget.stamps, manualTarget.stampTarget)}
+                <ChevronRight className="mx-1 inline size-3 text-espresso-300" aria-hidden="true" />
+                <span className="font-extrabold text-leaf-700">
+                  {stampFraction(
+                    Math.min(manualTarget.stamps + 1, manualTarget.stampTarget),
+                    manualTarget.stampTarget
                   )}
-                </div>
-              </Link>
-            ))}
+                </span>
+              </span>
+            </div>
           </div>
         )}
-      </div>
-
-      {/* Manual Quick Stamp Modal */}
-      {showManualModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-stone-200 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
-              <h3 className="text-base font-bold text-[#3A1E0D]">Add Stamp Manually</h3>
-              <button
-                onClick={() => setShowManualModal(false)}
-                className="text-stone-400 hover:text-stone-600 text-sm font-bold p-1"
-              >
-                ✕
-              </button>
-            </div>
-
-            {manualSuccessMsg && (
-              <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600" />
-                <span className="font-medium">{manualSuccessMsg}</span>
-              </div>
-            )}
-
-            <div className="mt-4 space-y-3">
-              <p className="text-xs text-stone-500">
-                Select a customer from the registered store directory:
-              </p>
-              {isCustomersLoading ? (
-                <p className="text-xs text-stone-400 italic py-4 text-center">
-                  Loading customers from Firestore...
-                </p>
-              ) : recentCustomers.length === 0 ? (
-                <p className="text-xs text-stone-400 italic py-4 text-center">
-                  No customers found. Scan a customer QR pass to register them.
-                </p>
-              ) : (
-                <div className="max-h-60 overflow-y-auto space-y-2 pr-1">
-                  {recentCustomers.map((c) => (
-                    <div
-                      key={c.id}
-                      className="p-3 bg-[#FAF7F2] hover:bg-[#F3E7DC] rounded-2xl border border-[#EBDCCF] flex items-center justify-between transition-colors"
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div
-                          className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs text-[#3A1E0D]"
-                          style={{ backgroundColor: c.avatarBg }}
-                        >
-                          {c.avatarInitial}
-                        </div>
-                        <div>
-                          <div className="font-bold text-xs text-[#3A1E0D]">{c.name}</div>
-                          <div className="text-[10px] text-stone-400">
-                            #{c.customerCode || c.id.substring(0, 6)} • Stamps: {c.stamps}/{c.stampTarget}
-                          </div>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => handleManualQuickStamp(c)}
-                        disabled={isSubmittingManual}
-                        className="px-3 py-1.5 bg-[#3A1E0D] hover:bg-[#4E2A14] text-white rounded-xl text-xs font-bold transition-all active:scale-95 flex items-center gap-1 shadow-xs cursor-pointer disabled:opacity-50"
-                      >
-                        {isSubmittingManual ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin text-[#E6B875]" />
-                        ) : (
-                          <>
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>Add +1</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      </ConfirmModal>
     </div>
   );
 }
