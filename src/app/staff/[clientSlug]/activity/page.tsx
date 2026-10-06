@@ -22,10 +22,10 @@ export default function RecentActivityPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
 
   const { client, staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const effectiveClientId = staffUser?.clientId || "";
 
   const [activities, setActivities] = useState<StaffActivityItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -34,10 +34,14 @@ export default function RecentActivityPage({
   useEffect(() => {
     if (!effectiveClientId) return;
 
-    const unsubscribe = FirebaseService.listenToRecentActivity(effectiveClientId, (liveItems) => {
-      setActivities(liveItems);
-      setIsLoading(false);
-    });
+    const unsubscribe = FirebaseService.listenToRecentActivity(
+      effectiveClientId,
+      (liveItems) => {
+        setActivities(liveItems);
+        setIsLoading(false);
+      },
+      () => setIsLoading(false)
+    );
 
     return () => unsubscribe();
   }, [effectiveClientId]);

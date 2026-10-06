@@ -22,11 +22,11 @@ export default function CustomerLookupPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
 
   const router = useRouter();
   const { staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const effectiveClientId = staffUser?.clientId || "";
 
   const [searchQuery, setSearchQuery] = useState("");
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
@@ -47,7 +47,10 @@ export default function CustomerLookupPage({
   }, [effectiveClientId, searchQuery]);
 
   useEffect(() => {
-    fetchCustomers();
+    const loadHandle = window.setTimeout(() => {
+      void fetchCustomers();
+    }, 0);
+    return () => window.clearTimeout(loadHandle);
   }, [effectiveClientId, fetchCustomers]);
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -197,7 +200,7 @@ export default function CustomerLookupPage({
                       )}
                     </div>
                     <div className="text-[11px] text-stone-400 mt-0.5">
-                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Store Member"}
+                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Table not provided"}
                     </div>
                   </div>
                 </div>

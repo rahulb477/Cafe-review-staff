@@ -1,19 +1,19 @@
 "use client";
 
-import React, { useEffect, useRef, useState, use, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import React, { use, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import jsQR from "jsqr";
 import {
+  AlertCircle,
+  Camera,
   ChevronLeft,
   Flashlight,
   FlashlightOff,
   Image as ImageIcon,
-  AlertCircle,
   Loader2,
-  Camera,
 } from "lucide-react";
 
 export default function QRScannerPage({
@@ -22,55 +22,79 @@ export default function QRScannerPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
-
+  const clientSlug = resolvedParams.clientSlug;
   const router = useRouter();
   const { playChime, staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const canonicalClientId = staffUser?.clientId || "";
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const scanInFlightRef = useRef(false);
+  const resumeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(false);
 
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
-  const [isScanning, setIsScanning] = useState<boolean>(true);
-  const [torchOn, setTorchOn] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string>("");
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isScanning, setIsScanning] = useState(true);
+  const [torchOn, setTorchOn] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  // Process detected QR code payload with Firebase Token Architecture
-  const handleScannedPayload = useCallback(async (rawQrString: string) => {
-    setIsProcessing(true);
-    setIsScanning(false);
-    setErrorMessage("");
-    playChime("scan");
+  const handleScannedPayload = useCallback(
+    async (rawQrString: string) => {
+      if (!rawQrString || scanInFlightRef.current || !canonicalClientId) return;
 
-    try {
-      const customer = await FirebaseService.scanAndResolveCustomer(rawQrString, effectiveClientId);
-      router.push(`/staff/${clientSlug}/customers/${customer.id}`);
-    } catch (err: any) {
-      console.error("Scan error:", err);
-      const msg = err.message || "Invalid customer QR token.";
-      setErrorMessage(msg);
-      playChime("error");
-      setIsProcessing(false);
-      setTimeout(() => {
-        setIsScanning(true);
-      }, 3000);
-    }
-  }, [clientSlug, effectiveClientId, playChime, router]);
+      scanInFlightRef.current = true;
+      setIsProcessing(true);
+      setIsScanning(false);
+      setErrorMessage("");
+      playChime("scan");
 
-  // Initialize Camera Stream
+      try {
+        const customer = await FirebaseService.scanAndResolveCustomer(
+          rawQrString,
+          canonicalClientId
+        );
+        if (mountedRef.current) {
+          router.push(`/staff/${canonicalClientId}/customers/${customer.id}`);
+        }
+      } catch (error: unknown) {
+        console.error("Scan error:", error);
+        if (!mountedRef.current) return;
+        const message = error instanceof Error ? error.message : "Invalid customer QR token.";
+        setErrorMessage(message);
+        playChime("error");
+        setIsProcessing(false);
+        scanInFlightRef.current = false;
+        resumeTimeoutRef.current = setTimeout(() => {
+          if (!mountedRef.current) return;
+          setIsScanning(true);
+          setErrorMessage("");
+        }, 3000);
+      }
+    },
+    [canonicalClientId, playChime, router]
+  );
+
+  // Camera access is started only in a client lifecycle effect.
   useEffect(() => {
     let active = true;
+    mountedRef.current = true;
 
     async function startCamera() {
+      if (typeof window === "undefined" || typeof navigator === "undefined") return;
+
       try {
-        if (!navigator?.mediaDevices?.getUserMedia) {
-          setHasCameraPermission(false);
-          setErrorMessage("Camera access is not supported by this browser environment.");
-          return;
+        const isLocalhost =
+          window.location.hostname === "localhost" ||
+          window.location.hostname === "127.0.0.1";
+        if (!window.isSecureContext && !isLocalhost) {
+          throw new Error("Camera access requires HTTPS.");
+        }
+
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+          throw new Error("Camera access is not supported by this browser.");
         }
 
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -83,131 +107,137 @@ export default function QRScannerPage({
         });
 
         if (!active) {
-          stream.getTracks().forEach((t) => t.stop());
+          stream.getTracks().forEach((track) => track.stop());
           return;
         }
 
         streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.setAttribute("playsinline", "true");
-          await videoRef.current.play();
+        const video = videoRef.current;
+        if (!video) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        video.srcObject = stream;
+        video.setAttribute("playsinline", "true");
+        await video.play();
+        if (active) {
           setHasCameraPermission(true);
           setErrorMessage("");
         }
-      } catch (err: any) {
-        console.warn("Camera init notice:", err);
+      } catch (error: unknown) {
+        console.warn("Camera init notice:", error);
+        if (!active) return;
         setHasCameraPermission(false);
-        setErrorMessage("Camera access was not granted. You can scan by uploading a pass photo or looking up customer by ID.");
+        setErrorMessage(
+          "Camera access was not granted. You can upload a QR image or look up the customer by ID."
+        );
       }
     }
 
-    startCamera();
+    void startCamera();
+    const videoElement = videoRef.current;
 
     return () => {
       active = false;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
+      mountedRef.current = false;
+      if (resumeTimeoutRef.current) clearTimeout(resumeTimeoutRef.current);
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      if (videoElement) videoElement.srcObject = null;
     };
   }, []);
 
-  // Continuous QR Code Scanning Loop via Canvas & jsQR
+  // Decode video frames on the client and cancel the loop on unmount.
   useEffect(() => {
-    let animationFrameId: number;
+    if (typeof window === "undefined") return;
+    let animationFrameId = 0;
 
     const scanFrame = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
       if (
         isScanning &&
         !isProcessing &&
-        videoRef.current &&
-        videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA &&
-        canvasRef.current
+        !scanInFlightRef.current &&
+        video &&
+        video.readyState >= HTMLMediaElement.HAVE_ENOUGH_DATA &&
+        video.videoWidth > 0 &&
+        video.videoHeight > 0 &&
+        canvas
       ) {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-        if (ctx) {
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (context) {
           canvas.width = video.videoWidth;
           canvas.height = video.videoHeight;
-          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          context.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
           const code = jsQR(imageData.data, imageData.width, imageData.height, {
             inversionAttempts: "dontInvert",
           });
 
-          if (code && code.data) {
-            handleScannedPayload(code.data);
+          if (code?.data) {
+            void handleScannedPayload(code.data);
             return;
           }
         }
       }
 
-      if (isScanning && !isProcessing) {
-        animationFrameId = requestAnimationFrame(scanFrame);
+      if (isScanning && !isProcessing && !scanInFlightRef.current) {
+        animationFrameId = window.requestAnimationFrame(scanFrame);
       }
     };
 
-    animationFrameId = requestAnimationFrame(scanFrame);
+    animationFrameId = window.requestAnimationFrame(scanFrame);
+    return () => window.cancelAnimationFrame(animationFrameId);
+  }, [handleScannedPayload, isProcessing, isScanning]);
 
-    return () => {
-      cancelAnimationFrame(animationFrameId);
-    };
-  }, [isScanning, isProcessing, handleScannedPayload]);
-
-  // Toggle Torch/Flashlight
   const toggleFlashlight = async () => {
-    if (!streamRef.current) return;
-    const track = streamRef.current.getVideoTracks()[0];
-    if (track) {
-      try {
-        const capabilities = (track.getCapabilities && track.getCapabilities()) || {};
-        if ("torch" in capabilities) {
-          const nextState = !torchOn;
-          await (track as any).applyConstraints({
-            advanced: [{ torch: nextState }],
-          });
-          setTorchOn(nextState);
-        } else {
-          setTorchOn(!torchOn);
-        }
-      } catch {
-        setTorchOn(!torchOn);
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+
+    try {
+      const capabilities = track.getCapabilities?.();
+      if (capabilities && "torch" in capabilities) {
+        const nextState = !torchOn;
+        await track.applyConstraints({
+          advanced: [{ torch: nextState } as unknown as MediaTrackConstraintSet],
+        });
+        setTorchOn(nextState);
       }
+    } catch (error) {
+      console.warn("Torch control notice:", error);
     }
   };
 
-  // Handle Photo Upload Scanning
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || scanInFlightRef.current) return;
 
     const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        if (!canvasRef.current) return;
+    reader.onload = (loadEvent) => {
+      const image = new Image();
+      image.onload = () => {
         const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) return;
+        const context = canvas?.getContext("2d");
+        if (!canvas || !context) return;
 
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        canvas.width = image.width;
+        canvas.height = image.height;
+        context.drawImage(image, 0, 0);
+        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
         const code = jsQR(imageData.data, imageData.width, imageData.height);
-
-        if (code && code.data) {
-          handleScannedPayload(code.data);
+        if (code?.data) {
+          void handleScannedPayload(code.data);
         } else {
           setErrorMessage("Could not detect a valid QR code in this image.");
         }
       };
-      img.src = event.target?.result as string;
+      image.onerror = () => setErrorMessage("The selected image could not be read.");
+      image.src = String(loadEvent.target?.result || "");
     };
+    reader.onerror = () => setErrorMessage("The selected image could not be read.");
     reader.readAsDataURL(file);
   };
 

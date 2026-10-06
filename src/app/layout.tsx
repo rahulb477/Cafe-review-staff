@@ -4,8 +4,8 @@ import "./globals.css";
 import { StaffAppProvider } from "@/context/StaffAppContext";
 
 export const metadata: Metadata = {
-  title: "BAKE - Staff Loyalty Experience Platform",
-  description: "Real production-ready staff loyalty application for customer lookup, QR scanning, loyalty stamps, and reward redemptions.",
+  title: "Staff Loyalty Experience Platform",
+  description: "Firebase staff application for customer lookup, QR scanning, loyalty stamps, and reward redemptions.",
 };
 
 export const viewport: Viewport = {

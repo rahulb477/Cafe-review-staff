@@ -1,0 +1,119 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function staffRecord() {
+      return get(/databases/$(database)/documents/staffUsers/$(request.auth.uid));
+    }
+
+    function activeStaff() {
+      return signedIn()
+        && (!('active' in staffRecord().data) || staffRecord().data.active == true)
+        && (!('status' in staffRecord().data)
+          || !(staffRecord().data.status in ['inactive', 'disabled', 'suspended']))
+        && ('clientId' in staffRecord().data);
+    }
+
+    function assignedClient(clientId) {
+      return activeStaff() && staffRecord().data.clientId == clientId;
+    }
+
+    function customerBelongsToStaff(customerData) {
+      return activeStaff()
+        && ('clientId' in customerData)
+        && customerData.clientId == staffRecord().data.clientId;
+    }
+
+    match /staffUsers/{uid} {
+      // A staff member can resolve only their own registry record.
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, create, update, delete: if false;
+    }
+
+    match /clients/{clientId} {
+      allow get: if assignedClient(clientId);
+      allow list, create, update, delete: if false;
+
+      match /stampTransactions/{transactionId} {
+        allow read: if assignedClient(clientId);
+        allow create: if assignedClient(clientId)
+          && request.resource.data.clientId == clientId
+          && request.resource.data.staffId == request.auth.uid
+          && request.resource.data.customerId is string
+          && get(/databases/$(database)/documents/customers/$(request.resource.data.customerId)).data.clientId == clientId;
+        allow update, delete: if false;
+      }
+
+      match /rewardRedemptions/{redemptionId} {
+        allow read: if assignedClient(clientId);
+        allow create: if assignedClient(clientId)
+          && request.resource.data.clientId == clientId
+          && request.resource.data.staffUid == request.auth.uid
+          && request.resource.data.customerId is string
+          && get(/databases/$(database)/documents/customers/$(request.resource.data.customerId)).data.clientId == clientId;
+        allow update, delete: if false;
+      }
+    }
+
+    match /customerTokens/{token} {
+      allow get: if activeStaff()
+        && (!exists(/databases/$(database)/documents/customerTokens/$(token))
+          || (
+            ('clientId' in resource.data)
+            && resource.data.clientId == staffRecord().data.clientId
+            && ('customerId' in resource.data)
+            && exists(/databases/$(database)/documents/customers/$(resource.data.customerId))
+            && customerBelongsToStaff(
+              get(/databases/$(database)/documents/customers/$(resource.data.customerId)).data
+            )
+          ));
+      allow list, create, update, delete: if false;
+    }
+
+    match /customers/{customerId} {
+      allow get: if activeStaff()
+        && (!exists(/databases/$(database)/documents/customers/$(customerId))
+          || customerBelongsToStaff(resource.data));
+      allow list: if customerBelongsToStaff(resource.data);
+      allow update: if customerBelongsToStaff(resource.data)
+        && customerBelongsToStaff(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'totalVisits',
+          'lastVisitAt',
+          'updatedAt',
+          'lastVisitTransactionId'
+        ]);
+      allow create, delete: if false;
+    }
+
+    match /loyaltyAccounts/{customerId} {
+      allow get: if activeStaff()
+        && (!exists(/databases/$(database)/documents/loyaltyAccounts/$(customerId))
+          || (
+            customerBelongsToStaff(resource.data)
+            && resource.data.customerId == customerId
+          ));
+      allow list: if false;
+      allow create: if activeStaff()
+        && request.resource.data.clientId == staffRecord().data.clientId
+        && request.resource.data.customerId == customerId;
+      allow update: if customerBelongsToStaff(resource.data)
+        && request.resource.data.clientId == staffRecord().data.clientId
+        && request.resource.data.customerId == customerId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'stamps',
+          'stampTarget',
+          'rewardName',
+          'isEligibleForReward',
+          'lastStampAt',
+          'updatedAt',
+          'totalRewardsRedeemed'
+        ]);
+      allow delete: if false;
+    }
+  }
+}

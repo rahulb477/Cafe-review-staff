@@ -8,8 +8,8 @@ import { Home, QrCode, Users, Clock, Settings } from "lucide-react";
 
 export function BottomNav() {
   const pathname = usePathname();
-  const { client } = useStaffApp();
-  const clientSlug = client?.slug || "bake";
+  const { client, staffUser } = useStaffApp();
+  const clientSlug = staffUser?.clientId || client?.slug || "";
 
   const tabs = [
     {
