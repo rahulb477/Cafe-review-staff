@@ -20,7 +20,7 @@ export default function StaffSettingsPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { client, staffUser, soundEnabled, setSoundEnabled, logout } = useStaffApp();
+  const { client, staffUser, clientId, soundEnabled, setSoundEnabled, logout } = useStaffApp();
 
   return (
     <div className="max-w-md mx-auto space-y-5 pb-6 select-none">
@@ -99,20 +99,28 @@ export default function StaffSettingsPage({
 
         <div className="divide-y divide-stone-100 text-xs">
           <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Business Tenant</span>
+            <span className="text-stone-500">Assigned Business</span>
             <span className="font-bold text-[#3A1E0D]">{client?.name || "Not configured"}</span>
           </div>
           <div className="py-2 flex items-center justify-between">
-            <span className="text-stone-500">Tenant Client ID</span>
-            <span className="font-mono text-stone-700">{staffUser?.clientId || "Not available"}</span>
+            <span className="text-stone-500">Business Client ID</span>
+            <span className="font-mono text-stone-700">{clientId || "Not available"}</span>
           </div>
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Stamp Target</span>
-            <span className="font-bold text-[#8C5D3B]">{client?.stampTarget || 0} stamps</span>
+            <span className="font-bold text-[#8C5D3B]">
+              {client ? `${client.stampTarget} stamps` : "Not configured"}
+            </span>
           </div>
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Configured Reward</span>
             <span className="font-bold text-emerald-800">{client?.rewardName || "Not configured"}</span>
+          </div>
+          <div className="py-2 flex items-center justify-between">
+            <span className="text-stone-500">Loyalty Programme</span>
+            <span className="font-bold text-[#3A1E0D]">
+              {client ? (client.loyaltyEnabled ? "Enabled" : "Disabled") : "Not available"}
+            </span>
           </div>
         </div>
       </div>
@@ -127,7 +135,11 @@ export default function StaffSettingsPage({
         <div className="space-y-2 text-xs text-stone-600">
           <div className="flex items-start gap-2">
             <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <span><strong>Firestore Canonical Model:</strong> Authenticated UID resolves to <code>staffUsers/{'{uid}'}</code>.</span>
+            <span><strong>Firestore Canonical Model:</strong> Authenticated UID resolves to <code>staffUsers/{'{uid}'}</code> → <code>clientId</code> → <code>clients/{'{clientId}'}</code>.</span>
+          </div>
+          <div className="flex items-start gap-2">
+            <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <span><strong>One Staff • One Business:</strong> the assigned business is read from your staff record — it can never be switched from the browser.</span>
           </div>
           <div className="flex items-start gap-2">
             <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />

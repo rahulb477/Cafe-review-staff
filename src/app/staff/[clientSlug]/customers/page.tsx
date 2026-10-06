@@ -6,6 +6,10 @@ import { useRouter } from "next/navigation";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
+  describeErrorForDiagnostics,
+  toStaffServiceError,
+} from "@/services/staffErrors";
+import {
   ChevronLeft,
   Search,
   QrCode,
@@ -13,6 +17,8 @@ import {
   Loader2,
   X,
   Users,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 import { CustomerProfile } from "@/services/types";
 
@@ -25,38 +31,48 @@ export default function CustomerLookupPage({
   const clientSlug = resolvedParams.clientSlug;
 
   const router = useRouter();
-  const { staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || "";
+  const { clientId } = useStaffApp();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"all" | "reward_ready">("all");
 
-  const fetchCustomers = useCallback(async (query?: string) => {
+  /**
+   * Every query is scoped by the authenticated staff clientId inside the
+   * service (Firestore rules are not filters, so the query itself pins
+   * `clientId`). A search term is translated into equality/prefix Firestore
+   * queries — the directory is never downloaded and filtered in the browser.
+   */
+  const fetchCustomers = useCallback(async (term: string) => {
     setIsLoading(true);
     try {
-      const q = query !== undefined ? query : searchQuery;
-      const list = await FirebaseService.getCustomers(effectiveClientId, q);
+      const list = await FirebaseService.getCustomers({ search: term });
       setCustomers(list);
-    } catch (e) {
-      console.error("Error fetching customers:", e);
+      setErrorMessage(null);
+    } catch (error: unknown) {
+      const staffErr = toStaffServiceError(error);
+      console.error("[customers] lookup failed:", describeErrorForDiagnostics(staffErr));
+      setCustomers([]);
+      setErrorMessage(staffErr.message);
     } finally {
       setIsLoading(false);
     }
-  }, [effectiveClientId, searchQuery]);
+  }, []);
 
+  // Debounced search — one Firestore query per settled term instead of one per
+  // keystroke.
   useEffect(() => {
-    const loadHandle = window.setTimeout(() => {
-      void fetchCustomers();
-    }, 0);
-    return () => window.clearTimeout(loadHandle);
-  }, [effectiveClientId, fetchCustomers]);
+    if (!clientId) return;
+    const handle = window.setTimeout(() => {
+      void fetchCustomers(searchQuery);
+    }, searchQuery ? 300 : 0);
+    return () => window.clearTimeout(handle);
+  }, [clientId, fetchCustomers, searchQuery]);
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setSearchQuery(val);
-    fetchCustomers(val);
+    setSearchQuery(e.target.value);
   };
 
   // Filter based on tab
@@ -96,10 +112,7 @@ export default function CustomerLookupPage({
           />
           {searchQuery && (
             <button
-              onClick={() => {
-                setSearchQuery("");
-                fetchCustomers("");
-              }}
+              onClick={() => setSearchQuery("")}
               className="absolute inset-y-0 right-0 pr-3 flex items-center text-stone-400 hover:text-stone-600 cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -153,7 +166,22 @@ export default function CustomerLookupPage({
       </div>
 
       {/* Customer List matching Screen 9 */}
-      {isLoading ? (
+      {errorMessage ? (
+        <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs space-y-2">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{errorMessage}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchCustomers(searchQuery)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-red-200 font-bold text-[11px] hover:bg-red-50 cursor-pointer"
+          >
+            <RefreshCw className="w-3 h-3" />
+            <span>Retry</span>
+          </button>
+        </div>
+      ) : isLoading ? (
         <div className="py-12 text-center text-stone-400">
           <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
           <p className="text-xs">Loading customer directory from Firestore...</p>

@@ -5,6 +5,11 @@ import Link from "next/link";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
+  describeErrorForDiagnostics,
+  StaffServiceError,
+  toStaffServiceError,
+} from "@/services/staffErrors";
+import {
   QrCode,
   Plus,
   Search,
@@ -16,6 +21,7 @@ import {
   ChevronRight,
   ShieldCheck,
   CheckCircle,
+  AlertCircle,
   Loader2,
 } from "lucide-react";
 import { DashboardStats, CustomerProfile } from "@/services/types";
@@ -28,14 +34,20 @@ export default function StaffDashboardPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { client, staffUser, playChime } = useStaffApp();
+  const { client, staffUser, clientId, playChime } = useStaffApp();
   const [stats, setStats] = useState<DashboardStats>({
     todayStamps: 0,
     todayCustomers: 0,
     todayReviews: 0,
     rewardsRedeemed: 0,
+    reviewsAvailable: true,
+    customersAvailable: true,
   });
   const [recentCustomers, setRecentCustomers] = useState<CustomerProfile[]>([]);
+  const [isStatsLoading, setIsStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [isCustomersLoading, setIsCustomersLoading] = useState(true);
+  const [customersError, setCustomersError] = useState<string | null>(null);
 
   // Manual stamp modal
   const [showManualModal, setShowManualModal] = useState(false);
@@ -43,7 +55,6 @@ export default function StaffDashboardPage({
   const [isSubmittingManual, setIsSubmittingManual] = useState(false);
 
   const staffName = staffUser?.name || "Staff Member";
-  const effectiveClientId = staffUser?.clientId || "";
 
   // Formatted date
   const todayFormatted = new Intl.DateTimeFormat("en-US", {
@@ -52,30 +63,53 @@ export default function StaffDashboardPage({
     month: "short",
   }).format(new Date());
 
-  // Listen for live Firestore dashboard statistics and load customers
+  // Live Firestore dashboard metrics + the assigned business's customers.
+  // Every query is scoped to the canonical clientId from the staff session.
   useEffect(() => {
-    if (!effectiveClientId) return;
+    if (!clientId) return;
+    let active = true;
 
-    // 1. Live dashboard stats listener
-    const unsubStats = FirebaseService.listenToDashboardStats(effectiveClientId, (liveStats) => {
-      setStats(liveStats);
-    });
+    const unsubStats = FirebaseService.listenToDashboardStats(
+      (liveStats) => {
+        if (!active) return;
+        setStats(liveStats);
+        setIsStatsLoading(false);
+        setStatsError(null);
+      },
+      (error: StaffServiceError) => {
+        if (!active) return;
+        console.warn("[dashboard] stats notice:", describeErrorForDiagnostics(error));
+        setStatsError(error.message);
+        setIsStatsLoading(false);
+      }
+    );
 
-    // Load active customers list
-    FirebaseService.getCustomers(effectiveClientId)
-      .then((custs) => {
-        setRecentCustomers(custs.slice(0, 5));
+    FirebaseService.getCustomers()
+      .then((customers) => {
+        if (!active) return;
+        setRecentCustomers(customers.slice(0, 5));
+        setCustomersError(null);
       })
-      .catch((e) => console.error("Error loading customers:", e));
+      .catch((error: unknown) => {
+        const staffErr = toStaffServiceError(error);
+        console.warn("[dashboard] customer list notice:", describeErrorForDiagnostics(staffErr));
+        if (!active) return;
+        setCustomersError(staffErr.message);
+      })
+      .finally(() => {
+        if (active) setIsCustomersLoading(false);
+      });
 
     return () => {
+      active = false;
       unsubStats();
     };
-  }, [effectiveClientId]);
+  }, [clientId]);
 
   const handleManualQuickStamp = async (customer: CustomerProfile) => {
     if (!staffUser || isSubmittingManual) return;
     setIsSubmittingManual(true);
+    setManualSuccessMsg("");
     try {
       const res = await FirebaseService.addStamp(
         customer.id,
@@ -86,18 +120,19 @@ export default function StaffDashboardPage({
       if (res.success) {
         playChime(res.rewardUnlocked ? "reward" : "stamp");
         setManualSuccessMsg(`Stamp added to ${customer.name}'s account!`);
-        // Refresh customer list
-        const updated = await FirebaseService.getCustomers(effectiveClientId);
+        const updated = await FirebaseService.getCustomers();
         setRecentCustomers(updated.slice(0, 5));
+        setCustomersError(null);
         setTimeout(() => {
           setManualSuccessMsg("");
           setShowManualModal(false);
         }, 1500);
       }
-    } catch (e: any) {
-      console.error(e);
+    } catch (error: unknown) {
+      const staffErr = toStaffServiceError(error);
+      console.error("[dashboard] manual stamp failed:", describeErrorForDiagnostics(staffErr));
       playChime("error");
-      setManualSuccessMsg(e.message || "Failed to add stamp.");
+      setManualSuccessMsg(staffErr.message);
     } finally {
       setIsSubmittingManual(false);
     }
@@ -126,7 +161,7 @@ export default function StaffDashboardPage({
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
           <div>
             <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {stats.todayStamps}
+              {isStatsLoading ? "…" : stats.todayStamps}
             </div>
             <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
               Today&apos;s Stamps
@@ -141,7 +176,7 @@ export default function StaffDashboardPage({
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
           <div>
             <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {stats.todayCustomers}
+              {isStatsLoading ? "…" : stats.customersAvailable ? stats.todayCustomers : "—"}
             </div>
             <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
               Total Customers
@@ -156,7 +191,7 @@ export default function StaffDashboardPage({
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
           <div>
             <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {stats.todayReviews}
+              {isStatsLoading ? "…" : stats.reviewsAvailable ? stats.todayReviews : "—"}
             </div>
             <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
               Reviews
@@ -171,7 +206,7 @@ export default function StaffDashboardPage({
         <div className="bg-white rounded-3xl p-4 sm:p-5 border border-[#EBDCCF] shadow-xs flex items-center justify-between transition-transform hover:-translate-y-0.5 duration-200">
           <div>
             <div className="text-2xl sm:text-3xl font-extrabold text-[#3A1E0D]">
-              {stats.rewardsRedeemed}
+              {isStatsLoading ? "…" : stats.rewardsRedeemed}
             </div>
             <div className="text-[11px] sm:text-xs text-stone-500 font-semibold mt-0.5">
               Rewards Redeemed
@@ -182,6 +217,14 @@ export default function StaffDashboardPage({
           </div>
         </div>
       </div>
+
+      {/* Firestore error state — a real failure is never rendered as a zero */}
+      {(statsError || customersError) && (
+        <div className="p-3 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span className="flex-1">{statsError || customersError}</span>
+        </div>
+      )}
 
       {/* Quick Actions Header (Screen 2) */}
       <div className="space-y-3">
@@ -292,7 +335,12 @@ export default function StaffDashboardPage({
           </Link>
         </div>
 
-        {recentCustomers.length === 0 ? (
+        {isCustomersLoading ? (
+          <div className="py-6 text-center text-stone-400">
+            <Loader2 className="w-6 h-6 mx-auto mb-1 animate-spin text-[#3A1E0D]" />
+            <p className="text-xs">Loading customers from Firestore...</p>
+          </div>
+        ) : recentCustomers.length === 0 ? (
           <div className="py-6 text-center text-stone-400">
             <Users className="w-8 h-8 mx-auto mb-1 text-stone-300" />
             <p className="text-xs">No customer profiles registered yet for this store.</p>
@@ -361,7 +409,11 @@ export default function StaffDashboardPage({
               <p className="text-xs text-stone-500">
                 Select a customer from the registered store directory:
               </p>
-              {recentCustomers.length === 0 ? (
+              {isCustomersLoading ? (
+                <p className="text-xs text-stone-400 italic py-4 text-center">
+                  Loading customers from Firestore...
+                </p>
+              ) : recentCustomers.length === 0 ? (
                 <p className="text-xs text-stone-400 italic py-4 text-center">
                   No customers found. Scan a customer QR pass to register them.
                 </p>
