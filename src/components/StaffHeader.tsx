@@ -1,31 +1,25 @@
 "use client";
 
 import React, { useState } from "react";
+import Link from "next/link";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { BakedLogoIcon } from "./Icons";
-import { Bell, ChevronDown, CheckCircle2, Gift, Sparkles, X } from "lucide-react";
-import Link from "next/link";
+import { Bell, ChevronDown, X } from "lucide-react";
 
 export function StaffHeader() {
   const { client, staffUser, setIsDrawerOpen } = useStaffApp();
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const clientName = client?.name || "BAKE";
-  const clientTagline = client?.tagline || "CAFÉ & BAKERY";
-  const staffName = staffUser?.name || "Amit";
-  const staffRole = staffUser?.role || "Staff";
-
-  const notifications = [
-    { id: 1, title: "Kavya is ready for reward!", time: "10 mins ago", type: "reward", unread: true },
-    { id: 2, title: "Rahul added 1 stamp", time: "25 mins ago", type: "stamp", unread: false },
-    { id: 3, title: "Daily target 50% reached", time: "1 hour ago", type: "info", unread: false },
-  ];
+  const clientSlug = staffUser?.clientId || client?.slug || "";
+  const clientName = client?.name || "Staff Portal";
+  const clientTagline = client?.tagline || "FIREBASE STAFF CONSOLE";
+  const staffName = staffUser?.name || "Staff Member";
+  const staffRole = staffUser?.role || "Staff Member";
 
   return (
     <>
       <header className="sticky top-0 z-30 bg-[#FDFBF7]/95 backdrop-blur-md border-b border-[#EBDCCF]/60 px-4 py-3 flex items-center justify-between shadow-xs">
-        {/* Brand / Logo */}
-        <Link href={`/staff/${client?.slug || "bake"}`} className="flex items-center gap-2.5 group">
+        <Link href={`/staff/${clientSlug}`} className="flex items-center gap-2.5 group">
           <BakedLogoIcon className="w-8 h-8 group-hover:scale-105 transition-transform" />
           <div className="flex flex-col">
             <span className="font-extrabold text-sm tracking-wide text-[#3A1E0D] leading-tight">
@@ -37,19 +31,15 @@ export function StaffHeader() {
           </div>
         </Link>
 
-        {/* Right Controls: Notifications & Staff Profile */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Notification Button */}
           <button
             onClick={() => setShowNotifications(!showNotifications)}
             className="relative p-2 rounded-full text-[#4A2810] hover:bg-[#F3E7DC] transition-colors focus:outline-none focus:ring-2 focus:ring-[#B97B32]/30"
             aria-label="Notifications"
           >
             <Bell className="w-5 h-5" />
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-[#E11D48] rounded-full ring-2 ring-white animate-pulse" />
           </button>
 
-          {/* Staff Pill Avatar Trigger (Screen 2 / Screen 12) */}
           <button
             onClick={() => setIsDrawerOpen(true)}
             className="flex items-center gap-1.5 pl-1.5 pr-2 py-1 rounded-full bg-[#F5EBE0] hover:bg-[#ECD8C8] border border-[#DFC8B4] transition-all group focus:outline-none focus:ring-2 focus:ring-[#B97B32]/30"
@@ -71,7 +61,6 @@ export function StaffHeader() {
         </div>
       </header>
 
-      {/* Notification Dropdown Popover */}
       {showNotifications && (
         <div
           role="region"
@@ -83,32 +72,14 @@ export function StaffHeader() {
             <button
               onClick={() => setShowNotifications(false)}
               className="text-stone-400 hover:text-stone-600 p-1"
+              aria-label="Close notifications"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
-          <div className="space-y-2">
-            {notifications.map((n) => (
-              <div
-                key={n.id}
-                className={`p-2.5 rounded-xl text-xs flex items-start gap-2.5 transition-colors ${
-                  n.unread ? "bg-[#FFF8F0] border border-[#F5DEC7]" : "bg-stone-50"
-                }`}
-              >
-                {n.type === "reward" ? (
-                  <Gift className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                ) : n.type === "stamp" ? (
-                  <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
-                )}
-                <div className="flex-1">
-                  <p className="font-medium text-stone-800 leading-tight">{n.title}</p>
-                  <p className="text-[10px] text-stone-400 mt-0.5">{n.time}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+          <p className="px-2 py-4 text-center text-xs text-stone-400">
+            No new notifications.
+          </p>
         </div>
       )}
     </>

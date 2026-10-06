@@ -30,12 +30,12 @@ export default function CustomerDetailPage({
   params: Promise<{ clientSlug: string; customerId: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
   const customerId = resolvedParams.customerId;
 
   const router = useRouter();
   const { playChime, staffUser, client } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const effectiveClientId = staffUser?.clientId || "";
 
   const [customer, setCustomer] = useState<CustomerProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -62,7 +62,10 @@ export default function CustomerDetailPage({
   }, [customerId, effectiveClientId]);
 
   useEffect(() => {
-    fetchCustomer();
+    const loadHandle = window.setTimeout(() => {
+      void fetchCustomer();
+    }, 0);
+    return () => window.clearTimeout(loadHandle);
   }, [fetchCustomer]);
 
   // Trigger celebration confetti
@@ -86,13 +89,7 @@ export default function CustomerDetailPage({
     setShowConfirmStampModal(false);
 
     try {
-      const idempotencyKey = `tx_${effectiveClientId}_${customer.id}_${Date.now()}`;
-      const data = await FirebaseService.addStamp(
-        effectiveClientId,
-        customer.id,
-        staffUser,
-        idempotencyKey
-      );
+      const data = await FirebaseService.addStamp(customer.id);
 
       if (data.success && data.customer) {
         setCustomer(data.customer);
@@ -125,13 +122,7 @@ export default function CustomerDetailPage({
     setShowRedeemConfirmModal(false);
 
     try {
-      const idempotencyKey = `tx_redeem_${effectiveClientId}_${customer.id}_${Date.now()}`;
-      const data = await FirebaseService.redeemReward(
-        effectiveClientId,
-        customer.id,
-        staffUser,
-        idempotencyKey
-      );
+      const data = await FirebaseService.redeemReward(customer.id);
 
       if (data.success && data.customer) {
         setCustomer(data.customer);
@@ -177,11 +168,11 @@ export default function CustomerDetailPage({
     );
   }
 
-  const stampTarget = customer.stampTarget || client?.stampTarget || 8;
+  const stampTarget = customer.stampTarget || client?.stampTarget || 0;
   const stampsCount = customer.stamps;
   const stampsRemaining = Math.max(0, stampTarget - stampsCount);
   const isRewardReady = stampsCount >= stampTarget || customer.isEligibleForReward;
-  const rewardTitle = customer.rewardName || client?.rewardName || "Free Coffee";
+  const rewardTitle = customer.rewardName || client?.rewardName || "Reward not configured";
 
   // ==========================================
   // VIEW 1: STAMP ADDED SUCCESS (SCREEN 6)
@@ -353,7 +344,7 @@ export default function CustomerDetailPage({
             Customer #{customer.customerCode || customer.id.substring(0, 6)}
           </p>
           <p className="text-[11px] text-stone-400 mt-0.5 truncate">
-            {customer.tableNumber || "Store Member"} • Visiting since {customer.visitingSince || "Recently"}
+            {customer.tableNumber || "Table not provided"} • Visiting since {customer.visitingSince || "Not provided"}
           </p>
         </div>
       </div>

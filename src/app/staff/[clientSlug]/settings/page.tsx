@@ -18,7 +18,7 @@ export default function StaffSettingsPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
 
   const { client, staffUser, soundEnabled, setSoundEnabled, logout } = useStaffApp();
 
@@ -47,7 +47,7 @@ export default function StaffSettingsPage({
           <h2 className="text-base font-extrabold text-[#3A1E0D] truncate">
             {staffUser?.name || "Staff Member"}
           </h2>
-          <p className="text-xs text-stone-500 truncate">{staffUser?.email || "staff@cafe.com"}</p>
+          <p className="text-xs text-stone-500 truncate">{staffUser?.email || "No email available"}</p>
           <div className="flex items-center gap-2 mt-1 flex-wrap">
             <span className="px-2 py-0.5 rounded-full bg-[#FAF3EC] text-[#8C5D3B] text-[10px] font-bold border border-[#EBDCCF]">
               {staffUser?.role || "Staff Member"}
@@ -100,28 +100,28 @@ export default function StaffSettingsPage({
         <div className="divide-y divide-stone-100 text-xs">
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Business Tenant</span>
-            <span className="font-bold text-[#3A1E0D]">{client?.name || "BAKE"}</span>
+            <span className="font-bold text-[#3A1E0D]">{client?.name || "Not configured"}</span>
           </div>
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Tenant Client ID</span>
-            <span className="font-mono text-stone-700">{staffUser?.clientId || clientSlug}</span>
+            <span className="font-mono text-stone-700">{staffUser?.clientId || "Not available"}</span>
           </div>
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Stamp Target</span>
-            <span className="font-bold text-[#8C5D3B]">{client?.stampTarget || 8} stamps</span>
+            <span className="font-bold text-[#8C5D3B]">{client?.stampTarget || 0} stamps</span>
           </div>
           <div className="py-2 flex items-center justify-between">
             <span className="text-stone-500">Configured Reward</span>
-            <span className="font-bold text-emerald-800">{client?.rewardName || "Free Coffee"}</span>
+            <span className="font-bold text-emerald-800">{client?.rewardName || "Not configured"}</span>
           </div>
         </div>
       </div>
 
-      {/* Security & Multi-Tenant Rules */}
+      {/* Security & Staff Assignment Rules */}
       <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-3">
         <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400 flex items-center gap-1.5">
           <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          <span>Firestore Security & Multi-Tenant Isolation</span>
+          <span>Firestore Security & Staff Isolation</span>
         </h3>
 
         <div className="space-y-2 text-xs text-stone-600">

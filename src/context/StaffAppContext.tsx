@@ -1,9 +1,9 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
-import { ClientConfig, StaffUser } from "@/services/types";
+import React, { createContext, useContext, useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { FirebaseService } from "@/services/firebaseService";
-import { useRouter, usePathname } from "next/navigation";
+import { ClientConfig, StaffUser } from "@/services/types";
 
 interface StaffAppContextType {
   client: ClientConfig | null;
@@ -14,7 +14,6 @@ interface StaffAppContextType {
   setIsDrawerOpen: (open: boolean) => void;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  switchClient: (newSlug: string) => void;
   refreshClientData: () => Promise<void>;
   playChime: (type?: "stamp" | "reward" | "scan" | "error") => void;
   soundEnabled: boolean;
@@ -23,35 +22,27 @@ interface StaffAppContextType {
 
 const StaffAppContext = createContext<StaffAppContextType | null>(null);
 
-const DEFAULT_CLIENT_CONFIG: ClientConfig = {
-  id: "bake",
-  slug: "bake",
-  name: "BAKE",
-  tagline: "CAFÉ & BAKERY",
-  logoText: "BAKE",
-  stampTarget: 8,
-  rewardName: "Free Coffee",
-  rewardDescription: "Redeem any specialty beverage of your choice",
-  primaryColor: "#3A1E0D",
-  accentColor: "#D4A373",
-  iconType: "coffee-bean",
-};
+function getWorkspaceRoute(pathname: string | null): { slug: string; suffix: string } | null {
+  if (!pathname || !pathname.startsWith("/staff/")) return null;
+  const match = pathname.match(/^\/staff\/([^/]+)(\/.*)?$/);
+  if (!match || match[1] === "login") return null;
+  return { slug: decodeURIComponent(match[1]), suffix: match[2] || "" };
+}
 
-export function StaffAppProvider({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  const [client, setClient] = useState<ClientConfig | null>(DEFAULT_CLIENT_CONFIG);
+function canonicalStaffRoute(clientId: string, suffix = ""): string {
+  return `/staff/${encodeURIComponent(clientId)}${suffix}`;
+}
+
+export function StaffAppProvider({ children }: { children: React.ReactNode }) {
+  const [client, setClient] = useState<ClientConfig | null>(null);
   const [staffUser, setStaffUser] = useState<StaffUser | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(true);
   const router = useRouter();
   const pathname = usePathname();
 
-  // Listen for Firebase Auth state changes
   useEffect(() => {
     const unsubscribe = FirebaseService.listenToAuth(
       (authenticatedStaff, clientConfig) => {
@@ -60,21 +51,33 @@ export function StaffAppProvider({
         setIsLoading(false);
         setAuthError(null);
 
-        // If currently on login page and successfully authenticated, redirect to staff dashboard
+        const workspaceRoute = getWorkspaceRoute(pathname);
         if (pathname === "/staff/login" || pathname === "/" || pathname === "/staff") {
-          router.push(`/staff/${authenticatedStaff.clientId}`);
+          router.replace(canonicalStaffRoute(authenticatedStaff.clientId));
+        } else if (
+          workspaceRoute &&
+          workspaceRoute.slug.toLowerCase() !== authenticatedStaff.clientId.toLowerCase()
+        ) {
+          // The authenticated staff registry is authoritative. Preserve the
+          // current screen, but move it under the assigned business route.
+          router.replace(
+            canonicalStaffRoute(authenticatedStaff.clientId, workspaceRoute.suffix)
+          );
         }
       },
       () => {
-        // Not authenticated
         setStaffUser(null);
+        setClient(null);
+        setAuthError(null);
         setIsLoading(false);
+        if (getWorkspaceRoute(pathname)) router.replace("/staff/login");
       },
       (errorMsg) => {
-        // Auth or staff validation error
         setStaffUser(null);
+        setClient(null);
         setAuthError(errorMsg);
         setIsLoading(false);
+        if (getWorkspaceRoute(pathname)) router.replace("/staff/login");
       }
     );
 
@@ -84,89 +87,92 @@ export function StaffAppProvider({
   const login = async (email: string, password: string) => {
     setIsLoading(true);
     setAuthError(null);
+
     try {
-      const res = await FirebaseService.login(email, password);
-      if (res.success && res.staffUser) {
-        setStaffUser(res.staffUser);
-        const config = await FirebaseService.getClientConfig(res.staffUser.clientId);
-        setClient(config);
+      const result = await FirebaseService.login(email, password);
+      if (!result.success || !result.staffUser) {
+        const error = result.error || "Login failed.";
         setIsLoading(false);
-        router.push(`/staff/${res.staffUser.clientId}`);
-        return { success: true };
+        setAuthError(error);
+        return { success: false, error };
       }
+
+      const config = await FirebaseService.getClientConfig(result.staffUser.clientId);
+      setStaffUser(result.staffUser);
+      setClient(config);
       setIsLoading(false);
-      setAuthError(res.error || "Login failed");
-      return { success: false, error: res.error || "Login failed" };
-    } catch (e: any) {
+      router.replace(canonicalStaffRoute(result.staffUser.clientId));
+      return { success: true };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Unable to sign in.";
       setIsLoading(false);
-      const errMsg = e.message || "Network error occurred";
-      setAuthError(errMsg);
-      return { success: false, error: errMsg };
+      setAuthError(message);
+      return { success: false, error: message };
     }
   };
 
   const logout = async () => {
     await FirebaseService.logout();
     setStaffUser(null);
+    setClient(null);
     setIsDrawerOpen(false);
-    router.push("/staff/login");
-  };
-
-  const switchClient = async (newSlug: string) => {
-    setIsDrawerOpen(false);
-    const config = await FirebaseService.getClientConfig(newSlug);
-    setClient(config);
-    router.push(`/staff/${newSlug}`);
+    router.replace("/staff/login");
   };
 
   const refreshClientData = async () => {
-    if (staffUser?.clientId) {
-      const config = await FirebaseService.getClientConfig(staffUser.clientId);
-      setClient(config);
-    }
+    if (!staffUser?.clientId) return;
+    const config = await FirebaseService.getClientConfig(staffUser.clientId);
+    setClient(config);
   };
 
   const playChime = (type: "stamp" | "reward" | "scan" | "error" = "stamp") => {
     if (!soundEnabled || typeof window === "undefined") return;
-    try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
 
-      const now = ctx.currentTime;
+    try {
+      const AudioContextConstructor =
+        window.AudioContext ||
+        (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (!AudioContextConstructor) return;
+
+      const audioContext = new AudioContextConstructor();
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+
+      const now = audioContext.currentTime;
       if (type === "stamp") {
-        osc.frequency.setValueAtTime(587.33, now); // D5
-        osc.frequency.exponentialRampToValueAtTime(880, now + 0.15); // A5
+        oscillator.frequency.setValueAtTime(587.33, now);
+        oscillator.frequency.exponentialRampToValueAtTime(880, now + 0.15);
         gain.gain.setValueAtTime(0.2, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
-        osc.start(now);
-        osc.stop(now + 0.3);
+        oscillator.start(now);
+        oscillator.stop(now + 0.3);
       } else if (type === "reward") {
-        osc.frequency.setValueAtTime(523.25, now);
-        osc.frequency.setValueAtTime(659.25, now + 0.1);
-        osc.frequency.setValueAtTime(783.99, now + 0.2);
-        osc.frequency.setValueAtTime(1046.5, now + 0.3);
+        oscillator.frequency.setValueAtTime(523.25, now);
+        oscillator.frequency.setValueAtTime(659.25, now + 0.1);
+        oscillator.frequency.setValueAtTime(783.99, now + 0.2);
+        oscillator.frequency.setValueAtTime(1046.5, now + 0.3);
         gain.gain.setValueAtTime(0.25, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
-        osc.start(now);
-        osc.stop(now + 0.55);
+        oscillator.start(now);
+        oscillator.stop(now + 0.55);
       } else if (type === "scan") {
-        osc.frequency.setValueAtTime(800, now);
+        oscillator.frequency.setValueAtTime(800, now);
         gain.gain.setValueAtTime(0.15, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
-        osc.start(now);
-        osc.stop(now + 0.08);
+        oscillator.start(now);
+        oscillator.stop(now + 0.08);
       } else {
-        osc.frequency.setValueAtTime(220, now);
+        oscillator.frequency.setValueAtTime(220, now);
         gain.gain.setValueAtTime(0.2, now);
         gain.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-        osc.start(now);
-        osc.stop(now + 0.25);
+        oscillator.start(now);
+        oscillator.stop(now + 0.25);
       }
     } catch {
-      // AudioContext policy
+      // Browsers can reject AudioContext until a user gesture.
     }
   };
 
@@ -181,7 +187,6 @@ export function StaffAppProvider({
         setIsDrawerOpen,
         login,
         logout,
-        switchClient,
         refreshClientData,
         playChime,
         soundEnabled,

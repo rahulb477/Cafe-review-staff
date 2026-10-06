@@ -75,10 +75,10 @@ function StaffLoginContent() {
         <div className="flex flex-col items-center mb-6 text-center animate-in fade-in slide-in-from-top-4 duration-300">
           <BakedLogoIcon className="w-16 h-16 shadow-lg mb-2" />
           <h1 className="text-2xl font-extrabold text-white tracking-widest">
-            {client?.name || "BAKE"}
+            {client?.name || "Staff Portal"}
           </h1>
           <p className="text-[11px] font-semibold text-[#D4A373] tracking-widest uppercase">
-            {client?.tagline || "CAFÉ & BAKERY"}
+            {client?.tagline || "FIREBASE STAFF CONSOLE"}
           </p>
         </div>
 

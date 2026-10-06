@@ -23,10 +23,10 @@ export default function RewardsCatalogPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
 
   const { client, staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const effectiveClientId = staffUser?.clientId || "";
 
   const [readyCustomers, setReadyCustomers] = useState<CustomerProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -50,9 +50,9 @@ export default function RewardsCatalogPage({
     loadReady();
   }, [effectiveClientId]);
 
-  const rewardTitle = client?.rewardName || "Free Coffee";
-  const rewardDesc = client?.rewardDescription || "Redeem any specialty beverage of your choice";
-  const stampTarget = client?.stampTarget || 8;
+  const rewardTitle = client?.rewardName || "Reward not configured";
+  const rewardDesc = client?.rewardDescription || "Configure a reward in Firebase to display it here.";
+  const stampTarget = client?.stampTarget || 0;
 
   return (
     <div className="max-w-md mx-auto space-y-5 pb-6 select-none">

@@ -18,7 +18,7 @@ import {
   CheckCircle,
   Loader2,
 } from "lucide-react";
-import { DashboardStats, CustomerProfile, StaffActivityItem } from "@/services/types";
+import { DashboardStats, CustomerProfile } from "@/services/types";
 
 export default function StaffDashboardPage({
   params,
@@ -26,7 +26,7 @@ export default function StaffDashboardPage({
   params: Promise<{ clientSlug: string }>;
 }) {
   const resolvedParams = use(params);
-  const clientSlug = resolvedParams.clientSlug || "bake";
+  const clientSlug = resolvedParams.clientSlug;
 
   const { client, staffUser, playChime } = useStaffApp();
   const [stats, setStats] = useState<DashboardStats>({
@@ -36,8 +36,6 @@ export default function StaffDashboardPage({
     rewardsRedeemed: 0,
   });
   const [recentCustomers, setRecentCustomers] = useState<CustomerProfile[]>([]);
-  const [recentActivities, setRecentActivities] = useState<StaffActivityItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
 
   // Manual stamp modal
   const [showManualModal, setShowManualModal] = useState(false);
@@ -45,7 +43,7 @@ export default function StaffDashboardPage({
   const [isSubmittingManual, setIsSubmittingManual] = useState(false);
 
   const staffName = staffUser?.name || "Staff Member";
-  const effectiveClientId = staffUser?.clientId || clientSlug;
+  const effectiveClientId = staffUser?.clientId || "";
 
   // Formatted date
   const todayFormatted = new Intl.DateTimeFormat("en-US", {
@@ -54,22 +52,16 @@ export default function StaffDashboardPage({
     month: "short",
   }).format(new Date());
 
-  // Listen for Live Firestore Dashboard Stats & Recent Activity
+  // Listen for live Firestore dashboard statistics and load customers
   useEffect(() => {
     if (!effectiveClientId) return;
 
     // 1. Live dashboard stats listener
     const unsubStats = FirebaseService.listenToDashboardStats(effectiveClientId, (liveStats) => {
       setStats(liveStats);
-      setIsLoading(false);
     });
 
-    // 2. Live recent activity listener
-    const unsubActivity = FirebaseService.listenToRecentActivity(effectiveClientId, (liveActivities) => {
-      setRecentActivities(liveActivities.slice(0, 3));
-    });
-
-    // 3. Load active customers list
+    // Load active customers list
     FirebaseService.getCustomers(effectiveClientId)
       .then((custs) => {
         setRecentCustomers(custs.slice(0, 5));
@@ -78,7 +70,6 @@ export default function StaffDashboardPage({
 
     return () => {
       unsubStats();
-      unsubActivity();
     };
   }, [effectiveClientId]);
 
@@ -86,12 +77,9 @@ export default function StaffDashboardPage({
     if (!staffUser || isSubmittingManual) return;
     setIsSubmittingManual(true);
     try {
-      const txId = `tx_manual_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const res = await FirebaseService.addStamp(
-        effectiveClientId,
         customer.id,
-        staffUser,
-        txId,
+        undefined,
         "Manual stamp from dashboard"
       );
 
@@ -329,7 +317,7 @@ export default function StaffDashboardPage({
                       {cust.name}
                     </div>
                     <div className="text-[10px] text-stone-400">
-                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Store Member"}
+                      #{cust.customerCode || cust.id.substring(0, 6)} • {cust.tableNumber || "Table not provided"}
                     </div>
                   </div>
                 </div>
