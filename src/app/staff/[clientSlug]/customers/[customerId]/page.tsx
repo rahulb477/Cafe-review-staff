@@ -5,6 +5,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
+import {
+  describeErrorForDiagnostics,
+  toStaffServiceError,
+} from "@/services/staffErrors";
 import confetti from "canvas-confetti";
 import {
   SingleStampBean,
@@ -34,8 +38,7 @@ export default function CustomerDetailPage({
   const customerId = resolvedParams.customerId;
 
   const router = useRouter();
-  const { playChime, staffUser, client } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || "";
+  const { playChime, staffUser, client, clientId } = useStaffApp();
 
   const [customer, setCustomer] = useState<CustomerProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -48,18 +51,23 @@ export default function CustomerDetailPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const fetchCustomer = useCallback(async () => {
+    if (!clientId) return;
     setIsLoading(true);
     setError("");
     try {
-      const data = await FirebaseService.getCustomerById(customerId, effectiveClientId);
+      // The service resolves the customer inside the authenticated clientId —
+      // the route slug/customerId never widen access.
+      const data = await FirebaseService.getCustomerById(customerId);
       setCustomer(data);
-    } catch (e: any) {
-      console.error("Fetch customer error:", e);
-      setError(e.message || "Failed to load customer profile.");
+    } catch (e: unknown) {
+      const staffErr = toStaffServiceError(e, "CUSTOMER_NOT_FOUND");
+      console.error("[customer-detail] load failed:", describeErrorForDiagnostics(staffErr));
+      setCustomer(null);
+      setError(staffErr.message);
     } finally {
       setIsLoading(false);
     }
-  }, [customerId, effectiveClientId]);
+  }, [clientId, customerId]);
 
   useEffect(() => {
     const loadHandle = window.setTimeout(() => {
@@ -106,9 +114,10 @@ export default function CustomerDetailPage({
         setError("Failed to add stamp.");
         playChime("error");
       }
-    } catch (e: any) {
-      console.error("Stamp transaction error:", e);
-      setError(e.message || "Error adding stamp.");
+    } catch (e: unknown) {
+      const staffErr = toStaffServiceError(e, "UNKNOWN");
+      console.error("[customer-detail] stamp failed:", describeErrorForDiagnostics(staffErr));
+      setError(staffErr.message);
       playChime("error");
     } finally {
       setIsSubmitting(false);
@@ -133,9 +142,10 @@ export default function CustomerDetailPage({
         setError("Failed to redeem reward.");
         playChime("error");
       }
-    } catch (e: any) {
-      console.error("Redemption error:", e);
-      setError(e.message || "Error redeeming reward.");
+    } catch (e: unknown) {
+      const staffErr = toStaffServiceError(e, "UNKNOWN");
+      console.error("[customer-detail] redemption failed:", describeErrorForDiagnostics(staffErr));
+      setError(staffErr.message);
       playChime("error");
     } finally {
       setIsSubmitting(false);

@@ -1,20 +1,76 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { useStaffApp } from "@/context/StaffAppContext";
+import { FirebaseService } from "@/services/firebaseService";
+import { StaffNotification } from "@/services/types";
 import { BakedLogoIcon } from "./Icons";
-import { Bell, ChevronDown, X } from "lucide-react";
+import { Bell, ChevronDown, Gift, Coffee, Cog, X } from "lucide-react";
+
+function NotificationIcon({ type }: { type: StaffNotification["type"] }) {
+  if (type === "REWARD_READY" || type === "REWARD_REDEEMED") {
+    return <Gift className="w-3.5 h-3.5" />;
+  }
+  if (type === "STAMP_ADDED") {
+    return <Coffee className="w-3.5 h-3.5" />;
+  }
+  return <Cog className="w-3.5 h-3.5" />;
+}
 
 export function StaffHeader() {
-  const { client, staffUser, setIsDrawerOpen } = useStaffApp();
+  const { client, staffUser, clientId, setIsDrawerOpen } = useStaffApp();
   const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<StaffNotification[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
 
-  const clientSlug = staffUser?.clientId || client?.slug || "";
+  const clientSlug = clientId || staffUser?.clientId || client?.slug || "";
   const clientName = client?.name || "Staff Portal";
   const clientTagline = client?.tagline || "FIREBASE STAFF CONSOLE";
   const staffName = staffUser?.name || "Staff Member";
   const staffRole = staffUser?.role || "Staff Member";
+
+  // Real Firebase notifications for the authenticated staff member's business.
+  useEffect(() => {
+    if (!clientId) return;
+
+    let active = true;
+
+    const unsubscribe = FirebaseService.listenToNotifications(
+      (items) => {
+        if (!active) return;
+        setNotifications(items);
+        setNotificationsError(null);
+        setNotificationsLoading(false);
+      },
+      (error) => {
+        if (!active) return;
+        setNotifications([]);
+        setNotificationsError(error.message);
+        setNotificationsLoading(false);
+      }
+    );
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [clientId]);
+
+  const unreadCount = notifications.filter((item) => !item.read).length;
+
+  const handleNotificationClick = async (notification: StaffNotification) => {
+    if (notification.read) return;
+    setNotifications((current) =>
+      current.map((item) => (item.id === notification.id ? { ...item, read: true } : item))
+    );
+    try {
+      await FirebaseService.markNotificationRead(notification.id);
+    } catch (error: unknown) {
+      console.warn("[staff-notifications] mark read notice:", error);
+    }
+  };
 
   return (
     <>
@@ -35,9 +91,16 @@ export function StaffHeader() {
           <button
             onClick={() => setShowNotifications(!showNotifications)}
             className="relative p-2 rounded-full text-[#4A2810] hover:bg-[#F3E7DC] transition-colors focus:outline-none focus:ring-2 focus:ring-[#B97B32]/30"
-            aria-label="Notifications"
+            aria-label={
+              unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"
+            }
           >
             <Bell className="w-5 h-5" />
+            {unreadCount > 0 && (
+              <span className="absolute top-0.5 right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#B97B32] text-white text-[9px] font-bold flex items-center justify-center">
+                {unreadCount > 9 ? "9+" : unreadCount}
+              </span>
+            )}
           </button>
 
           <button
@@ -77,9 +140,47 @@ export function StaffHeader() {
               <X className="w-4 h-4" />
             </button>
           </div>
-          <p className="px-2 py-4 text-center text-xs text-stone-400">
-            No new notifications.
-          </p>
+
+          {notificationsLoading ? (
+            <p className="px-2 py-4 text-center text-xs text-stone-400">Loading notifications...</p>
+          ) : notificationsError ? (
+            <p className="px-2 py-4 text-center text-xs text-red-600">{notificationsError}</p>
+          ) : notifications.length === 0 ? (
+            <p className="px-2 py-4 text-center text-xs text-stone-400">No new notifications.</p>
+          ) : (
+            <div className="max-h-72 overflow-y-auto space-y-1">
+              {notifications.map((notification) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  onClick={() => void handleNotificationClick(notification)}
+                  className={`w-full text-left flex items-start gap-2 rounded-xl px-2 py-2 transition-colors cursor-pointer ${
+                    notification.read ? "hover:bg-[#FAF7F2]" : "bg-[#FFF8F0] hover:bg-[#F7EDE2]"
+                  }`}
+                >
+                  <span className="mt-0.5 w-6 h-6 rounded-lg bg-[#FAF3EC] text-[#8C5D3B] flex items-center justify-center shrink-0">
+                    <NotificationIcon type={notification.type} />
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-[#3A1E0D] truncate">
+                        {notification.title}
+                      </span>
+                      {!notification.read && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#B97B32] shrink-0" />
+                      )}
+                    </span>
+                    <span className="block text-[11px] text-stone-500 break-words">
+                      {notification.message}
+                    </span>
+                    <span className="block text-[10px] text-stone-400 mt-0.5">
+                      {notification.createdAt || "Just now"}
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </>

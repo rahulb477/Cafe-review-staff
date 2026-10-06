@@ -6,6 +6,10 @@ import { useStaffApp } from "@/context/StaffAppContext";
 import { CoffeeCupIllustration, GiftBoxIllustration } from "@/components/Icons";
 import { FirebaseService } from "@/services/firebaseService";
 import {
+  describeErrorForDiagnostics,
+  toStaffServiceError,
+} from "@/services/staffErrors";
+import {
   ChevronLeft,
   Gift,
   CheckCircle2,
@@ -13,6 +17,7 @@ import {
   Sparkles,
   ArrowRight,
   Award,
+  AlertCircle,
   Loader2,
 } from "lucide-react";
 import { CustomerProfile } from "@/services/types";
@@ -25,30 +30,43 @@ export default function RewardsCatalogPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { client, staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || "";
+  const { client, clientId } = useStaffApp();
 
   const [readyCustomers, setReadyCustomers] = useState<CustomerProfile[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!clientId) return;
+    let active = true;
+
     async function loadReady() {
-      if (!effectiveClientId) return;
       setIsLoading(true);
       try {
-        const customers = await FirebaseService.getCustomers(effectiveClientId);
-        const ready = customers.filter(
-          (c: CustomerProfile) => c.stamps >= c.stampTarget || c.isEligibleForReward
+        const customers = await FirebaseService.getCustomers({ limit: 100 });
+        if (!active) return;
+        setReadyCustomers(
+          customers.filter(
+            (c: CustomerProfile) => c.isEligibleForReward || c.stamps >= c.stampTarget
+          )
         );
-        setReadyCustomers(ready);
-      } catch (e) {
-        console.error(e);
+        setErrorMessage(null);
+      } catch (error: unknown) {
+        const staffErr = toStaffServiceError(error);
+        console.error("[rewards] eligible customers failed:", describeErrorForDiagnostics(staffErr));
+        if (!active) return;
+        setReadyCustomers([]);
+        setErrorMessage(staffErr.message);
       } finally {
-        setIsLoading(false);
+        if (active) setIsLoading(false);
       }
     }
-    loadReady();
-  }, [effectiveClientId]);
+
+    void loadReady();
+    return () => {
+      active = false;
+    };
+  }, [clientId]);
 
   const rewardTitle = client?.rewardName || "Reward not configured";
   const rewardDesc = client?.rewardDescription || "Configure a reward in Firebase to display it here.";
@@ -102,7 +120,12 @@ export default function RewardsCatalogPage({
           </h3>
         </div>
 
-        {isLoading ? (
+        {errorMessage ? (
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{errorMessage}</span>
+          </div>
+        ) : isLoading ? (
           <div className="py-8 text-center text-stone-400">
             <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
             <p className="text-xs">Checking reward eligible customer accounts...</p>

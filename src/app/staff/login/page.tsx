@@ -1,24 +1,26 @@
 "use client";
 
 import React, { useState, Suspense } from "react";
-import { useRouter } from "next/navigation";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { BakedLogoIcon } from "@/components/Icons";
 import { Mail, Lock, Eye, EyeOff, ShieldCheck, ArrowRight, Loader2, AlertCircle } from "lucide-react";
 
 function StaffLoginContent() {
-  const router = useRouter();
-  const { login, client, authError } = useStaffApp();
+  const { login, client, authError, status, isLoading: isSessionLoading } = useStaffApp();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [showForgotModal, setShowForgotModal] = useState(false);
 
+  const isBusy = isSubmitting || status === "authorizing";
+
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+    if (isBusy) return;
+
     if (!email.trim()) {
       setErrorMessage("Please enter your staff email.");
       return;
@@ -29,21 +31,29 @@ function StaffLoginContent() {
     }
 
     setErrorMessage("");
-    setIsLoading(true);
+    setIsSubmitting(true);
 
     try {
       const res = await login(email.trim(), password);
       if (!res.success) {
         setErrorMessage(res.error || "Authentication failed. Please verify your credentials.");
       }
-    } catch (err: any) {
-      setErrorMessage(err.message || "An unexpected error occurred during login.");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "An unexpected error occurred during login.";
+      setErrorMessage(message);
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  const displayError = errorMessage || authError;
+  /**
+   * Only a *resolved* authorization failure may be displayed. While Firebase
+   * Auth is still initializing or while staffUsers/{uid} + clients/{clientId}
+   * are loading, the session status is "initializing"/"authorizing" and no error
+   * is rendered (the button shows its loading state instead).
+   */
+  const sessionError = status === "error" ? authError : null;
+  const displayError = errorMessage || sessionError;
 
   return (
     <div className="min-h-screen bg-[#2D1808] flex items-center justify-center p-4 relative overflow-hidden select-none">
@@ -112,6 +122,7 @@ function StaffLoginContent() {
                   placeholder="Staff Email"
                   required
                   autoComplete="email"
+                  disabled={isBusy}
                   className="w-full pl-10 pr-4 py-3 bg-[#FAF6F0] rounded-2xl border border-stone-200 text-xs sm:text-sm text-[#3A1E0D] placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-[#3A1E0D] focus:bg-white transition-all font-medium"
                 />
               </div>
@@ -130,6 +141,7 @@ function StaffLoginContent() {
                   placeholder="Password"
                   required
                   autoComplete="current-password"
+                  disabled={isBusy}
                   className="w-full pl-10 pr-11 py-3 bg-[#FAF6F0] rounded-2xl border border-stone-200 text-xs sm:text-sm text-[#3A1E0D] placeholder-stone-400 focus:outline-none focus:ring-2 focus:ring-[#3A1E0D] focus:bg-white transition-all font-medium"
                 />
                 <button
@@ -146,10 +158,10 @@ function StaffLoginContent() {
             {/* Sign In CTA Button (Screen 1) */}
             <button
               type="submit"
-              disabled={isLoading}
+              disabled={isBusy}
               className="w-full py-3.5 px-4 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-lg shadow-[#3A1E0D]/20 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed group cursor-pointer"
             >
-              {isLoading ? (
+              {isBusy ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-[#E6B875]" />
                   <span>Signing In...</span>
@@ -178,7 +190,11 @@ function StaffLoginContent() {
         {/* Bottom Badge (Screen 1) */}
         <div className="mt-6 flex items-center gap-1.5 text-xs text-[#D4A373]/80 font-medium">
           <ShieldCheck className="w-4 h-4 text-[#D4A373]" />
-          <span>Firebase Authenticated • Staff Portal</span>
+          <span>
+            {isSessionLoading && status === "initializing"
+              ? "Connecting to Firebase..."
+              : "Firebase Authenticated • Staff Portal"}
+          </span>
         </div>
       </div>
 

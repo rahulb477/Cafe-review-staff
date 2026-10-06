@@ -5,6 +5,10 @@ import Link from "next/link";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
+  describeErrorForDiagnostics,
+  toStaffServiceError,
+} from "@/services/staffErrors";
+import {
   ChevronLeft,
   Coffee,
   Gift,
@@ -13,6 +17,7 @@ import {
   Loader2,
   ChevronRight,
   ShieldCheck,
+  AlertCircle,
 } from "lucide-react";
 import { StaffActivityItem } from "@/services/types";
 
@@ -24,27 +29,37 @@ export default function RecentActivityPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { client, staffUser } = useStaffApp();
-  const effectiveClientId = staffUser?.clientId || "";
+  const { client, clientId } = useStaffApp();
 
   const [activities, setActivities] = useState<StaffActivityItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [selectedFilter, setSelectedFilter] = useState<string>("All Activity");
 
   useEffect(() => {
-    if (!effectiveClientId) return;
+    if (!clientId) return;
+    let active = true;
 
     const unsubscribe = FirebaseService.listenToRecentActivity(
-      effectiveClientId,
       (liveItems) => {
+        if (!active) return;
         setActivities(liveItems);
+        setErrorMessage(null);
         setIsLoading(false);
       },
-      () => setIsLoading(false)
+      (error) => {
+        if (!active) return;
+        console.warn("[activity] listener notice:", describeErrorForDiagnostics(error));
+        setErrorMessage(toStaffServiceError(error).message);
+        setIsLoading(false);
+      }
     );
 
-    return () => unsubscribe();
-  }, [effectiveClientId]);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [clientId]);
 
   const filterOptions = ["All Activity", "Stamps", "Rewards"];
 
@@ -95,6 +110,11 @@ export default function RecentActivityPage({
           <div className="py-12 text-center text-stone-400">
             <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
             <p className="text-xs">Loading activity stream from Firestore...</p>
+          </div>
+        ) : errorMessage ? (
+          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span className="flex-1">{errorMessage}</span>
           </div>
         ) : filteredActivities.length === 0 ? (
           <div className="py-12 text-center text-stone-400">
@@ -179,7 +199,7 @@ export default function RecentActivityPage({
       <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#EBDCCF] flex items-center justify-between text-[11px] text-[#8C5D3B]">
         <div className="flex items-center gap-1.5 font-medium">
           <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          <span>Scoped to {client?.name || effectiveClientId}</span>
+          <span>Scoped to {client?.name || clientId}</span>
         </div>
         <span className="font-bold">{client?.name || "Store"}</span>
       </div>

@@ -16,7 +16,7 @@ function getWorkspaceRoute(pathname: string | null): { slug: string; suffix: str
 }
 
 export function StaffShell({ children }: { children: React.ReactNode }) {
-  const { isLoading, authError, staffUser } = useStaffApp();
+  const { status, isLoading, authorizationError, staffUser, clientId } = useStaffApp();
   const pathname = usePathname();
   const router = useRouter();
   const workspaceRoute = getWorkspaceRoute(pathname);
@@ -27,6 +27,8 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
     }
   }, [isLoading, router, staffUser, workspaceRoute]);
 
+  // Firebase Auth / staff registry resolution is still running — never show an
+  // authorization error while the session is loading.
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center text-sm text-[#3A1E0D]">
@@ -35,14 +37,19 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (authError || !staffUser) {
+  if (status === "error" || !staffUser || !clientId) {
+    const detail =
+      process.env.NODE_ENV === "production" ? null : authorizationError?.technical ?? null;
     return (
       <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center p-6 text-center">
         <div className="max-w-md rounded-3xl bg-white border border-[#EBDCCF] p-6 shadow-xs">
           <h1 className="text-lg font-bold text-[#3A1E0D]">Staff session unavailable</h1>
           <p className="mt-2 text-sm text-stone-600">
-            {authError || "Please sign in with your Firebase staff account."}
+            {authorizationError?.message || "Please sign in with your Firebase staff account."}
           </p>
+          {detail && (
+            <p className="mt-2 text-[10px] font-mono text-stone-400 break-words">{detail}</p>
+          )}
           <button
             type="button"
             onClick={() => router.replace("/staff/login")}
@@ -57,7 +64,7 @@ export function StaffShell({ children }: { children: React.ReactNode }) {
 
   if (
     workspaceRoute &&
-    workspaceRoute.slug.toLowerCase() !== staffUser.clientId.toLowerCase()
+    workspaceRoute.slug.toLowerCase() !== clientId.toLowerCase()
   ) {
     return (
       <div className="min-h-screen bg-[#F8F4EC] flex items-center justify-center text-sm text-[#3A1E0D]">

@@ -1,21 +1,30 @@
 export interface ClientConfig {
   id?: string | number;
+  /** Canonical Firestore document id of clients/{clientId}. */
+  clientId?: string;
   slug: string;
   name: string;
+  businessName?: string;
+  displayName?: string;
   tagline: string;
   logoText: string;
+  logoUrl?: string | null;
   stampTarget: number;
   rewardName: string;
   rewardDescription: string;
+  /** clients/{clientId}.loyalty.enabled — false disables counter stamps. */
+  loyaltyEnabled: boolean;
   primaryColor: string;
   accentColor: string;
   iconType: string;
+  status?: string;
 }
 
 export interface StaffUser {
   id?: string | number;
   uid?: string;
-  clientId: string; // The canonical business clientId
+  /** The canonical business clientId — the ONLY tenant source of truth. */
+  clientId: string;
   clientSlug?: string;
   staffId?: string;
   name: string;
@@ -28,11 +37,13 @@ export interface StaffUser {
 }
 
 export interface CustomerProfile {
-  id: string; // Document ID in customers/{customerId}
+  /** Document id in customers/{customerId} (the customer's Firebase Auth uid). */
+  id: string;
   uid?: string;
   clientId: string;
   clientSlug?: string;
-  customerCode?: string; // Display code e.g. C10342
+  /** Display code (`code` / `customerCode`, falling back to the document id). */
+  customerCode?: string;
   name: string;
   email?: string;
   phone?: string;
@@ -53,6 +64,7 @@ export interface CustomerProfile {
   isEligibleForReward: boolean;
   lastStampAt?: string;
   updatedAt?: string;
+  createdAt?: string;
 }
 
 export interface StampTransactionResult {
@@ -65,6 +77,8 @@ export interface StampTransactionResult {
   rewardName: string;
   customer: CustomerProfile;
   message: string;
+  /** True when the same idempotency key had already been processed. */
+  replayed?: boolean;
 }
 
 export interface RewardRedemptionResult {
@@ -75,6 +89,7 @@ export interface RewardRedemptionResult {
   rewardName: string;
   customer: CustomerProfile;
   message: string;
+  replayed?: boolean;
 }
 
 export interface StaffActivityItem {
@@ -86,11 +101,11 @@ export interface StaffActivityItem {
   customerId?: string | number;
   customerName?: string;
   customerCode?: string;
-  activityType: 'STAMP_ADDED' | 'REWARD_REDEEMED' | 'NEW_CUSTOMER' | 'CUSTOMER_VISIT';
+  activityType: "STAMP_ADDED" | "REWARD_REDEEMED" | "NEW_CUSTOMER" | "CUSTOMER_VISIT";
   title: string;
   description: string;
   badgeText?: string;
-  badgeType?: 'stamp' | 'reward' | 'customer';
+  badgeType?: "stamp" | "reward" | "customer";
   timeFormatted: string;
   timestamp: string;
   transactionId?: string;
@@ -101,4 +116,37 @@ export interface DashboardStats {
   todayCustomers: number;
   todayReviews: number;
   rewardsRedeemed: number;
+  /** false → the reviews metric could not be read (rules/network); UI shows "—". */
+  reviewsAvailable: boolean;
+  /** false → today's customers could not be counted (index/rules); UI shows "—". */
+  customersAvailable: boolean;
+  loadedAt?: string;
+}
+
+/** clients/{clientId}/notifications/{notificationId} */
+export type StaffNotificationType = "REWARD_READY" | "STAMP_ADDED" | "REWARD_REDEEMED" | "SYSTEM";
+
+export interface StaffNotification {
+  id: string;
+  clientId: string;
+  type: StaffNotificationType;
+  title: string;
+  message: string;
+  customerId?: string;
+  read: boolean;
+  createdAt?: string;
+  createdAtMillis?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StaffSession {
+  firebaseUser: {
+    uid: string;
+    email?: string | null;
+    displayName?: string | null;
+  };
+  uid: string;
+  staffRecord: StaffUser;
+  clientId: string;
+  clientRecord: ClientConfig;
 }

@@ -1,55 +1,69 @@
-import { FirebaseApp, FirebaseOptions, getApp, getApps, initializeApp } from "firebase/app";
+import { FirebaseApp, getApp, getApps, initializeApp } from "firebase/app";
 import { Auth, getAuth } from "firebase/auth";
 import { Firestore, getFirestore } from "firebase/firestore";
+import {
+  EXPECTED_FIREBASE_PROJECT_ID,
+  firebaseConfig,
+  firebaseConfigDiagnostics,
+  firebaseConfigError,
+  isFirebaseConfigured,
+} from "./firebaseConfig";
 
-const firebaseConfig: FirebaseOptions = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+/**
+ * Firebase bootstrap for the Staff App (project cafe-review7).
+ *
+ * The app is client-side: `getFirebaseAuth()` / `getFirestoreDb()` return null
+ * while rendering on the server, so a Vercel build never touches Firebase and
+ * never needs credentials at build time.
+ */
+
+export {
+  EXPECTED_FIREBASE_PROJECT_ID,
+  firebaseConfig,
+  firebaseConfigDiagnostics,
+  firebaseConfigError,
+  isFirebaseConfigured,
 };
 
-const requiredConfigKeys: Array<keyof FirebaseOptions> = [
-  "apiKey",
-  "authDomain",
-  "projectId",
-  "storageBucket",
-  "messagingSenderId",
-  "appId",
-];
-
-const missingConfigKeys = requiredConfigKeys.filter((key) => {
-  const value = firebaseConfig[key];
-  return typeof value !== "string" || value.trim().length === 0;
-});
-
-/**
- * Firebase configuration is intentionally not replaced with defaults. A Vercel
- * build can still complete without these public variables, but the app reports
- * this diagnostic instead of connecting to an invalid Firebase project.
- */
-export const firebaseConfigError =
-  missingConfigKeys.length > 0
-    ? `Firebase is not configured. Set: ${missingConfigKeys
-        .map((key) => `NEXT_PUBLIC_FIREBASE_${key === "apiKey" ? "API_KEY" : key === "authDomain" ? "AUTH_DOMAIN" : key === "projectId" ? "PROJECT_ID" : key === "storageBucket" ? "STORAGE_BUCKET" : key === "messagingSenderId" ? "MESSAGING_SENDER_ID" : "APP_ID"}`)
-        .join(", ")}.`
-    : null;
-
-const canInitializeFirebase = !firebaseConfigError && typeof window !== "undefined";
-
-let app: FirebaseApp | null = null;
-if (canInitializeFirebase) {
-  app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+export function isBrowser(): boolean {
+  return typeof window !== "undefined";
 }
 
-/**
- * These remain nullable so server rendering and a build without Vercel
- * Firebase variables are safe. Firebase is initialized once in the browser
- * through getApps()/getApp().
- */
-export const auth: Auth | null = app ? getAuth(app) : null;
-export const db: Firestore | null = app ? getFirestore(app) : null;
+let cachedApp: FirebaseApp | null = null;
+let initializationError: string | null = null;
 
-export { app, firebaseConfig };
+/**
+ * The single Firebase app instance, or null when the configuration is invalid
+ * or when running on the server. Never invents fallback credentials.
+ */
+export function getFirebaseApp(): FirebaseApp | null {
+  if (firebaseConfigError) return null;
+  if (cachedApp) return cachedApp;
+
+  try {
+    cachedApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+    return cachedApp;
+  } catch (error) {
+    initializationError = error instanceof Error ? error.message : String(error);
+    console.error("[firebase] initialization failed:", initializationError);
+    return null;
+  }
+}
+
+export function getFirebaseInitializationError(): string | null {
+  return initializationError;
+}
+
+/** Firebase Auth — browser only (the Staff App is a client-side console). */
+export function getFirebaseAuth(): Auth | null {
+  if (!isBrowser()) return null;
+  const app = getFirebaseApp();
+  return app ? getAuth(app) : null;
+}
+
+/** Firestore — browser only. */
+export function getFirestoreDb(): Firestore | null {
+  if (!isBrowser()) return null;
+  const app = getFirebaseApp();
+  return app ? getFirestore(app) : null;
+}
