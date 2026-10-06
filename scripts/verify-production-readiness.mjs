@@ -132,7 +132,19 @@ check("clientId never read from URL, query string or browser storage", () => {
 });
 
 check("no tenant switcher / client dropdown exists", () => {
-  const patterns = [/Switch Client/i, /switchClient/i, /ClientSwitcher/, /TenantSwitcher/, /selectedTenant/i];
+  const patterns = [
+    /Switch Client/i,
+    /switchClient/i,
+    /Switch Business/i,
+    /switchBusiness/i,
+    /ClientSwitcher/,
+    /BusinessSwitcher/,
+    /TenantSwitcher/,
+    /selectedTenant/i,
+    /clientSelector/i,
+    /businessSelector/i,
+    /BAKE Cafe/i,
+  ];
   const hit = patterns.find((pattern) => pattern.test(allSrc));
   return hit ? `tenant switching pattern found: ${hit}` : true;
 });
@@ -348,26 +360,105 @@ check("every required error message exists exactly once per code", () => {
   return missing.length === 0 ? true : `missing messages: ${missing.join(" | ")}`;
 });
 
-/* --------------------------------------------------------- UI preserved */
+/* --------------------------------------------------- design system / UI */
 
-check("login screen design tokens are untouched", () => {
-  const login = read("src/app/staff/login/page.tsx");
+check("the staff design system is defined in globals.css", () => {
+  const css = read("src/app/globals.css");
   const tokens = [
-    "bg-[#2D1808]",
-    "rounded-3xl",
-    "bg-[#3A1E0D]",
-    "text-[#D4A373]",
-    "Staff Login",
-    "Forgot Password?",
-    "Firebase Authenticated • Staff Portal",
+    "@theme",
+    "--color-espresso-800: #3a1e0d;",
+    "--color-cream-50:",
+    "--color-linen:",
+    "--color-line:",
+    "--radius-xl: 18px;",
+    "--shadow-card:",
+    "env(safe-area-inset-bottom",
   ];
-  const missing = tokens.filter((token) => !login.includes(token));
-  return missing.length === 0 ? true : `design tokens missing: ${missing.join(", ")}`;
+  const missing = tokens.filter((token) => !css.includes(token));
+  if (missing.length > 0) return `design tokens missing: ${missing.join(", ")}`;
+  // Continuity with the deployed theme (same espresso primary).
+  return /--color-cafe-dark: #3a1e0d;/.test(css) ? true : "legacy cafe theme variables removed";
 });
 
-check("no new global styles or theme overrides were introduced", () => {
-  const css = read("src/app/globals.css");
-  return /--color-cafe-dark: #3A1E0D;/.test(css) ? true : "global theme variables changed";
+check("login screen uses the design system", () => {
+  const login = read("src/app/staff/login/page.tsx");
+  const tokens = [
+    "Staff Login",
+    "Forgot Password?",
+    "Secure Staff Access",
+    "bg-espresso-800",
+    "bg-cream-50",
+    "showPassword",
+  ];
+  const missing = tokens.filter((token) => !login.includes(token));
+  return missing.length === 0 ? true : `login tokens missing: ${missing.join(", ")}`;
+});
+
+check("every required reusable UI component exists", () => {
+  const required = [
+    "components/StaffHeader.tsx",
+    "components/SideMenu.tsx",
+    "components/ui/StatCard.tsx",
+    "components/ui/QuickAction.tsx",
+    "components/ui/BottomNavigation.tsx",
+    "components/ui/CustomerCard.tsx",
+    "components/ui/CustomerAvatar.tsx",
+    "components/ui/LoyaltyStampProgress.tsx",
+    "components/ui/StampSlot.tsx",
+    "components/ui/RewardCard.tsx",
+    "components/ui/ConfirmModal.tsx",
+    "components/ui/SuccessState.tsx",
+    "components/ui/ActivityItem.tsx",
+    "components/ui/EmptyState.tsx",
+    "components/ui/LoadingState.tsx",
+    "components/ui/ErrorState.tsx",
+    "components/ui/ScannerContainer.tsx",
+    "components/ui/NotificationItem.tsx",
+  ];
+  const missing = required.filter((file) => !exists(`src/${file}`));
+  return missing.length === 0 ? true : `missing components: ${missing.join(", ")}`;
+});
+
+check("screens are built from the shared components, not one-off markup", () => {
+  const consumers = {
+    "src/app/staff/[clientSlug]/page.tsx": ["StatCard", "QuickAction", "ActivityItem"],
+    "src/app/staff/[clientSlug]/customers/page.tsx": ["CustomerCard", "ScreenHeader"],
+    "src/app/staff/[clientSlug]/customers/[customerId]/page.tsx": [
+      "LoyaltyStampProgress",
+      "ConfirmModal",
+      "RewardCard",
+      "SuccessState",
+    ],
+    "src/app/staff/[clientSlug]/activity/page.tsx": ["ActivityItem", "ScreenHeader"],
+    "src/app/staff/[clientSlug]/scan/page.tsx": ["ScannerContainer", "ScreenHeader"],
+    "src/components/StaffHeader.tsx": ["NotificationItem", "CafeLogo"],
+    "src/components/SideMenu.tsx": ["CafeLogo", "CustomerAvatar"],
+  };
+  for (const [file, symbols] of Object.entries(consumers)) {
+    const text = read(file);
+    const missing = symbols.filter((symbol) => !text.includes(symbol));
+    if (missing.length > 0) return `${file} does not use ${missing.join(", ")}`;
+  }
+  return true;
+});
+
+check("bottom navigation respects the safe area and stays fixed", () => {
+  const nav = read("src/components/ui/BottomNavigation.tsx");
+  if (!/nav-safe-bottom/.test(nav)) return "bottom navigation ignores safe-area-inset-bottom";
+  if (!/fixed inset-x-0 bottom-0/.test(nav)) return "bottom navigation is not fixed";
+  const shell = read("src/components/StaffShell.tsx");
+  if (!/content-safe-bottom/.test(shell)) return "page content can hide behind the navigation";
+  return true;
+});
+
+check("the dashboard greeting/metrics are data-driven, never hardcoded", () => {
+  const dashboard = read("src/app/staff/[clientSlug]/page.tsx");
+  if (!/greetingForDate/.test(dashboard)) return "dashboard greeting is not time-aware";
+  if (!/listenToDashboardStats/.test(dashboard)) return "metrics are not Firestore listeners";
+  if (!/listenToRecentActivity/.test(dashboard)) return "today's activity is not Firestore data";
+  const hardcoded = /todayStamps: (?!0)|todayCustomers: (?!0)|todayReviews: (?!0)|rewardsRedeemed: (?!0)/;
+  if (hardcoded.test(dashboard)) return "a non-zero metric default is hardcoded";
+  return true;
 });
 
 /* --------------------------------------------------------------- report */

@@ -27,6 +27,7 @@ import {
   DocumentSnapshot,
 } from "firebase/firestore";
 import { firebaseConfigError, getFirebaseAuth, getFirestoreDb } from "@/lib/firebase";
+import { avatarTintFor } from "@/lib/format";
 import type { Firestore } from "firebase/firestore";
 import {
   buildClientConfig,
@@ -1658,16 +1659,26 @@ export class FirebaseService {
         firstString(customerData.code, customerData.customerCode) ||
         customerDocId.substring(0, 6).toUpperCase();
 
-      const avatarPalette = [
-        "#E8D5C4",
-        "#C4D8E8",
-        "#F4D2D2",
-        "#D7E9D7",
-        "#D2E4F4",
-        "#FED7AA",
-        "#E9D5FF",
-      ];
-      const avatarBg = avatarPalette[customerDocId.charCodeAt(0) % avatarPalette.length] || "#E8D5C4";
+      // Warm café tints, shared with the design system so a customer avatar
+      // looks identical in the lookup list, the detail card and the sheets.
+      const avatarBg = avatarTintFor(customerDocId);
+
+      // Newest real timestamp on the record, used only for relative
+      // "2 mins ago" copy in the lookup list. Missing data stays missing.
+      const lastStampAtMillis = this.timestampToMillis(loyaltyState.lastStampAt);
+      const lastVisitAtMillis = this.timestampToMillis(customerData.lastVisitAt);
+      const updatedAtMillis = this.timestampToMillis(customerData.updatedAt);
+      const createdAtMillis = this.timestampToMillis(customerData.createdAt);
+      const lastActivityMillis = [
+        lastStampAtMillis,
+        lastVisitAtMillis,
+        updatedAtMillis,
+        createdAtMillis,
+      ].reduce<number | undefined>(
+        (newest, candidate) =>
+          candidate === undefined ? newest : newest === undefined ? candidate : Math.max(newest, candidate),
+        undefined
+      );
 
       return {
         id: customerDocId,
@@ -1698,6 +1709,7 @@ export class FirebaseService {
         lastStampAt: this.formatFirestoreTimestamp(loyaltyState.lastStampAt),
         updatedAt: this.formatFirestoreTimestamp(customerData.updatedAt),
         createdAt: this.formatFirestoreTimestamp(customerData.createdAt),
+        lastActivityMillis,
       };
     } catch (error: unknown) {
       if (error instanceof StaffServiceError) throw error;

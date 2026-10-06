@@ -1,26 +1,37 @@
 "use client";
 
-import React, { useEffect, useState, use } from "react";
-import Link from "next/link";
+import React, { useEffect, useMemo, useState, use } from "react";
+import { ChevronDown, Clock, ShieldCheck } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
   describeErrorForDiagnostics,
   toStaffServiceError,
 } from "@/services/staffErrors";
-import {
-  ChevronLeft,
-  Coffee,
-  Gift,
-  UserCheck,
-  Clock,
-  Loader2,
-  ChevronRight,
-  ShieldCheck,
-  AlertCircle,
-} from "lucide-react";
-import { StaffActivityItem } from "@/services/types";
+import type { StaffActivityItem } from "@/services/types";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { Card } from "@/components/ui/Card";
+import { ActivityItem } from "@/components/ui/ActivityItem";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingState } from "@/components/ui/LoadingState";
 
+const FILTERS = [
+  { value: "all", label: "All Activity" },
+  { value: "stamps", label: "Stamps" },
+  { value: "rewards", label: "Rewards" },
+] as const;
+
+type FilterValue = (typeof FILTERS)[number]["value"];
+
+/**
+ * Screen 11 — Recent Activity.
+ *
+ * A live Firestore listener over clients/{clientId}/stampTransactions, ordered
+ * newest first and scoped to the authenticated staff member's business. No
+ * demo rows exist: an empty ledger renders the empty state.
+ */
 export default function RecentActivityPage({
   params,
 }: {
@@ -34,7 +45,7 @@ export default function RecentActivityPage({
   const [activities, setActivities] = useState<StaffActivityItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedFilter, setSelectedFilter] = useState<string>("All Activity");
+  const [filter, setFilter] = useState<FilterValue>("all");
 
   useEffect(() => {
     if (!clientId) return;
@@ -43,7 +54,12 @@ export default function RecentActivityPage({
     const unsubscribe = FirebaseService.listenToRecentActivity(
       (liveItems) => {
         if (!active) return;
-        setActivities(liveItems);
+        // Newest first — the ledger listener already orders by createdAt desc.
+        setActivities(
+          [...liveItems].sort(
+            (a, b) => Date.parse(b.timestamp || "") - Date.parse(a.timestamp || "")
+          )
+        );
         setErrorMessage(null);
         setIsLoading(false);
       },
@@ -61,147 +77,89 @@ export default function RecentActivityPage({
     };
   }, [clientId]);
 
-  const filterOptions = ["All Activity", "Stamps", "Rewards"];
-
-  const filteredActivities = activities.filter((act) => {
-    if (selectedFilter === "Stamps") return act.activityType === "STAMP_ADDED";
-    if (selectedFilter === "Rewards") return act.activityType === "REWARD_REDEEMED";
-    return true;
-  });
+  const visibleActivities = useMemo(() => {
+    if (filter === "stamps") return activities.filter((item) => item.activityType === "STAMP_ADDED");
+    if (filter === "rewards") {
+      return activities.filter((item) => item.activityType === "REWARD_REDEEMED");
+    }
+    return activities;
+  }, [activities, filter]);
 
   return (
-    <div className="max-w-md mx-auto space-y-4 pb-6 select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/staff/${clientSlug}`}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
+    <div className="mx-auto w-full max-w-md space-y-4">
+      <ScreenHeader title="Recent Activity" backHref={`/staff/${clientSlug}`} />
+
+      {/* Filter dropdown */}
+      <div className="relative">
+        <label htmlFor="activity-filter" className="sr-only">
+          Filter activity
+        </label>
+        <select
+          id="activity-filter"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value as FilterValue)}
+          className={cn(
+            "h-11 w-full appearance-none rounded-lg border border-line bg-cream-50 pl-3.5 pr-10",
+            "text-[0.82rem] font-bold text-espresso-800 shadow-hairline",
+            "focus:border-espresso-300 focus:outline-none focus:ring-2 focus:ring-espresso-800/15"
+          )}
         >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Recent Activity
-        </h1>
-        <div className="w-10" />
-      </div>
-
-      {/* Filter Dropdown / Pills matching Screen 11 */}
-      <div className="bg-white rounded-2xl p-2 border border-[#EBDCCF] shadow-xs flex items-center justify-between">
-        <div className="flex items-center gap-1.5 overflow-x-auto w-full py-1">
-          {filterOptions.map((opt) => (
-            <button
-              key={opt}
-              onClick={() => setSelectedFilter(opt)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer ${
-                selectedFilter === opt
-                  ? "bg-[#3A1E0D] text-white shadow-xs"
-                  : "text-stone-600 hover:bg-stone-100"
-              }`}
-            >
-              {opt}
-            </button>
+          {FILTERS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
           ))}
-        </div>
+        </select>
+        <ChevronDown
+          className="pointer-events-none absolute top-1/2 right-3.5 size-4 -translate-y-1/2 text-espresso-400"
+          aria-hidden="true"
+        />
       </div>
 
-      {/* Activity Timeline Container matching Screen 11 */}
-      <div className="bg-white rounded-3xl p-5 sm:p-6 border border-[#EBDCCF] shadow-xs">
+      {/* Timeline */}
+      <Card radius="xl" className="p-4 sm:p-5">
         {isLoading ? (
-          <div className="py-12 text-center text-stone-400">
-            <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
-            <p className="text-xs">Loading activity stream from Firestore...</p>
-          </div>
+          <LoadingState label="Loading activity…" />
         ) : errorMessage ? (
-          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span className="flex-1">{errorMessage}</span>
-          </div>
-        ) : filteredActivities.length === 0 ? (
-          <div className="py-12 text-center text-stone-400">
-            <Clock className="w-8 h-8 mx-auto mb-2 text-stone-300" />
-            <p className="font-bold text-sm text-[#3A1E0D]">No Activity Recorded</p>
-            <p className="text-xs text-stone-400 mt-1">
-              Stamps added and rewards redeemed for {client?.name || "this store"} will appear here in real-time.
-            </p>
-          </div>
+          <ErrorState message={errorMessage} title="Activity unavailable" />
+        ) : visibleActivities.length === 0 ? (
+          <EmptyState
+            bare
+            className="py-8"
+            icon={<Clock />}
+            title="No activity recorded"
+            message={
+              filter === "all"
+                ? `Stamps added and rewards redeemed at ${client?.name ?? "this business"} appear here in real time.`
+                : "Nothing matches this filter yet."
+            }
+          />
         ) : (
-          <div className="relative pl-6 sm:pl-8 space-y-6 before:absolute before:top-3 before:bottom-3 before:left-3 before:w-0.5 before:bg-[#EBDCCF]">
-            {filteredActivities.map((act) => {
-              const isStamp = act.activityType === "STAMP_ADDED";
-              const isReward = act.activityType === "REWARD_REDEEMED";
-
-              return (
-                <div key={act.id} className="relative group">
-                  {/* Timeline Node Icon (Screen 11) */}
-                  <div
-                    className={`absolute -left-6 sm:-left-8 top-0.5 w-6 h-6 sm:w-7 sm:h-7 rounded-full flex items-center justify-center border-2 border-white shadow-sm ring-1 ring-[#DFC8B4] ${
-                      isStamp
-                        ? "bg-[#FFEDD5] text-[#C2410C]"
-                        : isReward
-                        ? "bg-[#FCE7F3] text-[#BE185D]"
-                        : "bg-[#DCFCE7] text-[#15803D]"
-                    }`}
-                  >
-                    {isStamp ? (
-                      <Coffee className="w-3.5 h-3.5" />
-                    ) : isReward ? (
-                      <Gift className="w-3.5 h-3.5" />
-                    ) : (
-                      <UserCheck className="w-3.5 h-3.5" />
-                    )}
-                  </div>
-
-                  {/* Activity Details Card (Screen 11) */}
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <div className="text-[11px] font-semibold text-stone-400 flex items-center gap-1">
-                        <Clock className="w-3 h-3 text-stone-400" />
-                        <span>{act.timeFormatted || "Just now"}</span>
-                      </div>
-                      <h3 className="font-extrabold text-xs sm:text-sm text-[#3A1E0D] mt-0.5">
-                        {act.title}
-                      </h3>
-                      <p className="text-xs text-stone-500 font-medium">
-                        {act.description}
-                      </p>
-                      {act.customerId && (
-                        <Link
-                          href={`/staff/${clientSlug}/customers/${act.customerId}`}
-                          className="inline-flex items-center gap-1 text-[10px] font-bold text-[#8C5D3B] hover:text-[#3A1E0D] mt-1"
-                        >
-                          <span>View Profile</span>
-                          <ChevronRight className="w-3 h-3" />
-                        </Link>
-                      )}
-                    </div>
-
-                    {/* Badge on Right matching Screen 11 */}
-                    <div>
-                      {isStamp ? (
-                        <span className="px-2.5 py-1 rounded-full bg-[#DCFCE7] text-[#15803D] font-extrabold text-xs shadow-2xs">
-                          +1
-                        </span>
-                      ) : (
-                        <span className="px-2.5 py-1 rounded-full bg-[#FCE7F3] text-[#BE185D] font-extrabold text-xs shadow-2xs flex items-center gap-1">
-                          <Gift className="w-3 h-3" /> Redeemed
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <ul className="relative">
+            {visibleActivities.map((activity) => (
+              <ActivityItem
+                key={activity.id}
+                activity={activity}
+                timeline
+                customerHref={
+                  activity.customerId
+                    ? `/staff/${clientSlug}/customers/${activity.customerId}`
+                    : undefined
+                }
+              />
+            ))}
+          </ul>
         )}
-      </div>
+      </Card>
 
-      {/* Security note */}
-      <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#EBDCCF] flex items-center justify-between text-[11px] text-[#8C5D3B]">
-        <div className="flex items-center gap-1.5 font-medium">
-          <ShieldCheck className="w-4 h-4 text-emerald-700" />
-          <span>Scoped to {client?.name || clientId}</span>
-        </div>
-        <span className="font-bold">{client?.name || "Store"}</span>
+      <div className="flex items-center justify-between gap-2 rounded-lg border border-line bg-cream-200/60 px-3.5 py-2.5">
+        <span className="flex min-w-0 items-center gap-1.5 text-[0.7rem] font-semibold text-espresso-500">
+          <ShieldCheck className="size-3.5 shrink-0 text-leaf-600" aria-hidden="true" />
+          <span className="truncate">Scoped to your assigned business</span>
+        </span>
+        <span className="shrink-0 text-[0.7rem] font-bold text-espresso-700">
+          {client?.name || "—"}
+        </span>
       </div>
     </div>
   );

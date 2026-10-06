@@ -1,27 +1,27 @@
 "use client";
 
 import React, { useEffect, useState, use } from "react";
-import Link from "next/link";
+import { Award, Gift } from "lucide-react";
+import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
-import { CoffeeCupIllustration, GiftBoxIllustration } from "@/components/Icons";
 import { FirebaseService } from "@/services/firebaseService";
 import {
   describeErrorForDiagnostics,
   toStaffServiceError,
 } from "@/services/staffErrors";
-import {
-  ChevronLeft,
-  Gift,
-  CheckCircle2,
-  Clock,
-  Sparkles,
-  ArrowRight,
-  Award,
-  AlertCircle,
-  Loader2,
-} from "lucide-react";
-import { CustomerProfile } from "@/services/types";
+import type { CustomerProfile } from "@/services/types";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { SectionHeading } from "@/components/ui/Card";
+import { CustomerCard } from "@/components/ui/CustomerCard";
+import { EmptyState } from "@/components/ui/EmptyState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingState } from "@/components/ui/LoadingState";
+import { LinkButton } from "@/components/ui/Button";
+import { GiftBoxIllustration } from "@/components/Icons";
 
+const ELIGIBLE_DIRECTORY_LIMIT = 100;
+
+/** Rewards catalogue + the live queue of customers ready to redeem. */
 export default function RewardsCatalogPage({
   params,
 }: {
@@ -43,11 +43,11 @@ export default function RewardsCatalogPage({
     async function loadReady() {
       setIsLoading(true);
       try {
-        const customers = await FirebaseService.getCustomers({ limit: 100 });
+        const customers = await FirebaseService.getCustomers({ limit: ELIGIBLE_DIRECTORY_LIMIT });
         if (!active) return;
         setReadyCustomers(
           customers.filter(
-            (c: CustomerProfile) => c.isEligibleForReward || c.stamps >= c.stampTarget
+            (customer) => customer.isEligibleForReward || customer.stamps >= customer.stampTarget
           )
         );
         setErrorMessage(null);
@@ -69,109 +69,94 @@ export default function RewardsCatalogPage({
   }, [clientId]);
 
   const rewardTitle = client?.rewardName || "Reward not configured";
-  const rewardDesc = client?.rewardDescription || "Configure a reward in Firebase to display it here.";
+  const rewardDescription =
+    client?.rewardDescription || "Configure a reward in Firebase to display it here.";
   const stampTarget = client?.stampTarget || 0;
 
   return (
-    <div className="max-w-md mx-auto space-y-5 pb-6 select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/staff/${clientSlug}`}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
-        >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Rewards & Redemptions
-        </h1>
-        <div className="w-10" />
-      </div>
+    <div className="mx-auto w-full max-w-md space-y-5">
+      <ScreenHeader title="Rewards" backHref={`/staff/${clientSlug}`} />
 
-      {/* Active Reward Offer Card */}
-      <div className="bg-gradient-to-br from-[#3A1E0D] to-[#251206] text-white rounded-3xl p-6 shadow-xl relative overflow-hidden">
-        <div className="absolute -right-6 -bottom-6 w-36 h-36 bg-[#E6B875]/10 rounded-full blur-xl pointer-events-none" />
-        <div className="flex items-start justify-between">
-          <div>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#E6B875]/20 text-[#E6B875] text-[11px] font-bold mb-3 border border-[#E6B875]/30">
-              <Award className="w-3.5 h-3.5" /> Current Store Offer
-            </div>
-            <h2 className="text-xl font-extrabold text-white tracking-tight">
+      {/* Active offer — always read from clients/{clientId}.loyalty */}
+      <section
+        className={cn(
+          "cafe-motif relative overflow-hidden rounded-2xl border border-espresso-900",
+          "bg-espresso-800 p-5 text-cream-100 shadow-raise"
+        )}
+      >
+        <div className="relative flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-caramel-300/35 bg-caramel-300/15 px-2.5 py-1 text-[0.64rem] font-bold uppercase tracking-[0.1em] text-caramel-300">
+              <Award className="size-3" aria-hidden="true" />
+              Current Offer
+            </span>
+            <h2 className="mt-2.5 truncate text-[1.2rem] font-extrabold tracking-tight text-cream-50">
               {rewardTitle}
             </h2>
-            <p className="text-xs text-stone-300 mt-1 max-w-xs leading-relaxed">
-              {rewardDesc}
+            <p className="mt-1.5 text-[0.76rem] font-medium leading-relaxed text-cream-300/85">
+              {rewardDescription}
             </p>
           </div>
-          <GiftBoxIllustration className="w-16 h-16 shrink-0" />
+          <GiftBoxIllustration className="size-16 shrink-0" />
         </div>
 
-        <div className="mt-6 pt-4 border-t border-white/10 flex items-center justify-between text-xs text-stone-300">
-          <span>Target Required:</span>
-          <span className="font-extrabold text-[#E6B875] text-sm">{stampTarget} Stamps</span>
+        <div className="relative mt-5 flex items-center justify-between border-t border-cream-50/12 pt-3.5 text-[0.74rem]">
+          <span className="font-medium text-cream-300/80">Target required</span>
+          <span className="font-extrabold text-caramel-300 tabular-nums">
+            {stampTarget} stamps
+          </span>
         </div>
-      </div>
+      </section>
 
-      {/* Pending Unlocked Customers Ready for Redemption */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between px-1">
-          <h3 className="text-xs font-bold uppercase tracking-wider text-stone-400">
-            Customers Eligible for Redemption ({readyCustomers.length})
-          </h3>
-        </div>
+      {/* Live redemption queue */}
+      <section className="space-y-2.5">
+        <SectionHeading
+          title="Ready for Redemption"
+          action={
+            !isLoading && !errorMessage ? (
+              <span className="text-[0.7rem] font-semibold text-espresso-300 tabular-nums">
+                {readyCustomers.length}
+              </span>
+            ) : undefined
+          }
+        />
 
         {errorMessage ? (
-          <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span className="flex-1">{errorMessage}</span>
-          </div>
+          <ErrorState message={errorMessage} title="Rewards unavailable" />
         ) : isLoading ? (
-          <div className="py-8 text-center text-stone-400">
-            <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-[#3A1E0D]" />
-            <p className="text-xs">Checking reward eligible customer accounts...</p>
-          </div>
+          <LoadingState rows={2} label="Checking eligible customers…" />
         ) : readyCustomers.length === 0 ? (
-          <div className="bg-white rounded-3xl p-6 text-center border border-[#EBDCCF] shadow-xs">
-            <CheckCircle2 className="w-8 h-8 text-stone-300 mx-auto mb-2" />
-            <p className="font-bold text-sm text-[#3A1E0D]">No Pending Redemptions</p>
-            <p className="text-xs text-stone-400 mt-1">
-              Customers who reach {stampTarget}/{stampTarget} stamps will appear here ready to claim their reward.
-            </p>
-          </div>
+          <EmptyState
+            icon={<Gift />}
+            title="No pending redemptions"
+            message={
+              stampTarget > 0
+                ? `Customers who reach ${stampTarget} / ${stampTarget} stamps will appear here ready to claim ${rewardTitle}.`
+                : "Customers who complete their loyalty card will appear here."
+            }
+          />
         ) : (
-          <div className="space-y-2.5">
-            {readyCustomers.map((c) => (
-              <div
-                key={c.id}
-                className="bg-white rounded-2xl p-4 border border-emerald-300 shadow-xs flex items-center justify-between"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm text-[#3A1E0D]"
-                    style={{ backgroundColor: c.avatarBg }}
-                  >
-                    {c.avatarInitial}
-                  </div>
-                  <div>
-                    <div className="font-bold text-sm text-[#3A1E0D]">{c.name}</div>
-                    <div className="text-[11px] text-emerald-700 font-semibold flex items-center gap-1">
-                      <Gift className="w-3 h-3" /> Ready: {c.stamps}/{c.stampTarget} stamps
-                    </div>
-                  </div>
-                </div>
-
-                <Link
-                  href={`/staff/${clientSlug}/customers/${c.id}`}
-                  className="px-3.5 py-2 bg-[#3A1E0D] hover:bg-[#4E2A14] text-white rounded-xl text-xs font-bold flex items-center gap-1 transition-all shadow-xs"
-                >
-                  <span>Redeem</span>
-                  <ArrowRight className="w-3.5 h-3.5 text-[#E6B875]" />
-                </Link>
-              </div>
+          <ul className="space-y-2.5">
+            {readyCustomers.map((customer) => (
+              <li key={customer.id}>
+                <CustomerCard
+                  customer={customer}
+                  activityMillis={customer.lastActivityMillis}
+                  trailing={
+                    <LinkButton
+                      href={`/staff/${clientSlug}/customers/${customer.id}`}
+                      size="sm"
+                      variant="success"
+                    >
+                      Redeem
+                    </LinkButton>
+                  }
+                />
+              </li>
             ))}
-          </div>
+          </ul>
         )}
-      </div>
+      </section>
     </div>
   );
 }

@@ -1,33 +1,87 @@
 "use client";
 
-import React, { useEffect, useState, use, useCallback } from "react";
+import React, { useCallback, useEffect, useState, use } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import confetti from "canvas-confetti";
+import {
+  ArrowRight,
+  CalendarDays,
+  ChevronRight,
+  Clock,
+  Gift,
+  RotateCcw,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+import { cn } from "@/lib/cn";
+import { stampFraction } from "@/lib/format";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
   describeErrorForDiagnostics,
   toStaffServiceError,
 } from "@/services/staffErrors";
-import confetti from "canvas-confetti";
+import type { CustomerProfile } from "@/services/types";
+import { Card } from "@/components/ui/Card";
+import { ScreenHeader } from "@/components/ui/ScreenHeader";
+import { Button, LinkButton } from "@/components/ui/Button";
+import { CustomerAvatar } from "@/components/ui/CustomerAvatar";
+import { LoyaltyStampProgress } from "@/components/ui/LoyaltyStampProgress";
+import { RewardCard } from "@/components/ui/RewardCard";
+import { ConfirmModal } from "@/components/ui/ConfirmModal";
+import { SuccessState } from "@/components/ui/SuccessState";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingState } from "@/components/ui/LoadingState";
+import { EmptyState } from "@/components/ui/EmptyState";
 import {
-  SingleStampBean,
+  CelebrationHalo,
   CoffeeCupIllustration,
   GiftBoxIllustration,
 } from "@/components/Icons";
-import {
-  ChevronLeft,
-  Gift,
-  Clock,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
-  ArrowRight,
-  ShieldCheck,
-  RotateCcw,
-} from "lucide-react";
-import { CustomerProfile } from "@/services/types";
 
+type ViewState = "detail" | "stamp_success" | "reward_unlocked";
+
+function InfoRow({
+  icon,
+  label,
+  value,
+  valueClassName,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  valueClassName?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-2.5">
+      <span className="flex min-w-0 items-center gap-2 text-[0.76rem] font-semibold text-espresso-400">
+        <span className="text-espresso-300 [&>svg]:size-3.5">{icon}</span>
+        <span className="truncate">{label}</span>
+      </span>
+      <span
+        className={cn(
+          "min-w-0 truncate text-right text-[0.78rem] font-bold text-espresso-800",
+          valueClassName
+        )}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Screens 4, 5, 6, 7, 8 and 10 — one component.
+ *
+ * The QR flow ("Customer Found") and Customer Lookup ("Customer Detail /
+ * Redeem") render the exact same view, so the loyalty block, confirm sheet,
+ * success state and redemption sheet can never drift apart.
+ *
+ * All writes go through FirebaseService:
+ *   addStamp      → clients/{clientId}/stampTransactions/{id} + visit counting
+ *                   + loyaltyAccounts/{customerId}
+ *   redeemReward  → clients/{clientId}/rewardRedemptions/{id} + atomic reset
+ */
 export default function CustomerDetailPage({
   params,
 }: {
@@ -37,26 +91,28 @@ export default function CustomerDetailPage({
   const clientSlug = resolvedParams.clientSlug;
   const customerId = resolvedParams.customerId;
 
-  const router = useRouter();
-  const { playChime, staffUser, client, clientId } = useStaffApp();
+  const { playChime, staffUser, client } = useStaffApp();
 
   const [customer, setCustomer] = useState<CustomerProfile | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string>("");
 
-  // Modals & View States
+  const [viewState, setViewState] = useState<ViewState>("detail");
   const [showConfirmStampModal, setShowConfirmStampModal] = useState(false);
   const [showRedeemConfirmModal, setShowRedeemConfirmModal] = useState(false);
-  const [viewState, setViewState] = useState<"detail" | "stamp_success" | "reward_unlocked">("detail");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [lastResult, setLastResult] = useState<{
+    stamps: number;
+    target: number;
+    rewardUnlocked: boolean;
+  } | null>(null);
 
   const fetchCustomer = useCallback(async () => {
-    if (!clientId) return;
     setIsLoading(true);
     setError("");
     try {
-      // The service resolves the customer inside the authenticated clientId —
-      // the route slug/customerId never widen access.
+      // Resolved inside the authenticated clientId — the route slug/customerId
+      // can never widen access to another business.
       const data = await FirebaseService.getCustomerById(customerId);
       setCustomer(data);
     } catch (e: unknown) {
@@ -67,40 +123,46 @@ export default function CustomerDetailPage({
     } finally {
       setIsLoading(false);
     }
-  }, [clientId, customerId]);
+  }, [customerId]);
 
+  // Deferred a tick so the effect body never calls setState synchronously
+  // (React Compiler rule) while the load still starts on mount.
   useEffect(() => {
-    const loadHandle = window.setTimeout(() => {
+    const handle = window.setTimeout(() => {
       void fetchCustomer();
     }, 0);
-    return () => window.clearTimeout(loadHandle);
+    return () => window.clearTimeout(handle);
   }, [fetchCustomer]);
 
-  // Trigger celebration confetti
   const triggerConfetti = () => {
     try {
       confetti({
         particleCount: 70,
         spread: 60,
         origin: { y: 0.6 },
-        colors: ["#D4A373", "#B97B32", "#E11D48", "#10B981", "#3A1E0D"],
+        colors: ["#D4A373", "#B97B32", "#3A1E0D", "#3F8F5C", "#E6B875"],
       });
     } catch {
-      // fallback
+      // Confetti is decorative only.
     }
   };
 
-  // Safe 2-Step Atomic Stamp Transaction
+  /** Safe two-step atomic stamp transaction (screen 5 → 6/7). */
   const handleConfirmAddStamp = async () => {
     if (!customer || !staffUser || isSubmitting) return;
     setIsSubmitting(true);
-    setShowConfirmStampModal(false);
 
     try {
       const data = await FirebaseService.addStamp(customer.id);
 
       if (data.success && data.customer) {
         setCustomer(data.customer);
+        setLastResult({
+          stamps: data.newStamps,
+          target: data.stampTarget,
+          rewardUnlocked: data.rewardUnlocked,
+        });
+        setShowConfirmStampModal(false);
         triggerConfetti();
 
         if (data.rewardUnlocked) {
@@ -111,12 +173,14 @@ export default function CustomerDetailPage({
           setViewState("stamp_success");
         }
       } else {
+        setShowConfirmStampModal(false);
         setError("Failed to add stamp.");
         playChime("error");
       }
     } catch (e: unknown) {
       const staffErr = toStaffServiceError(e, "UNKNOWN");
       console.error("[customer-detail] stamp failed:", describeErrorForDiagnostics(staffErr));
+      setShowConfirmStampModal(false);
       setError(staffErr.message);
       playChime("error");
     } finally {
@@ -124,27 +188,29 @@ export default function CustomerDetailPage({
     }
   };
 
-  // Atomic Reward Redemption in clients/{clientId}/rewardRedemptions/{redemptionId}
+  /** Atomic redemption in clients/{clientId}/rewardRedemptions/{id} (screen 8). */
   const handleConfirmRedeem = async () => {
     if (!customer || !staffUser || isSubmitting) return;
     setIsSubmitting(true);
-    setShowRedeemConfirmModal(false);
 
     try {
       const data = await FirebaseService.redeemReward(customer.id);
 
       if (data.success && data.customer) {
         setCustomer(data.customer);
+        setShowRedeemConfirmModal(false);
+        setViewState("detail");
         playChime("reward");
         triggerConfetti();
-        setViewState("detail");
       } else {
+        setShowRedeemConfirmModal(false);
         setError("Failed to redeem reward.");
         playChime("error");
       }
     } catch (e: unknown) {
       const staffErr = toStaffServiceError(e, "UNKNOWN");
       console.error("[customer-detail] redemption failed:", describeErrorForDiagnostics(staffErr));
+      setShowRedeemConfirmModal(false);
       setError(staffErr.message);
       playChime("error");
     } finally {
@@ -152,418 +218,420 @@ export default function CustomerDetailPage({
     }
   };
 
+  /* ------------------------------------------------------------------ */
+
   if (isLoading) {
     return (
-      <div className="min-h-[60vh] flex flex-col items-center justify-center space-y-3">
-        <Loader2 className="w-8 h-8 animate-spin text-[#3A1E0D]" />
-        <p className="text-xs text-stone-500 font-medium">Finding customer in store records...</p>
+      <div className="mx-auto w-full max-w-md">
+        <ScreenHeader title="Customer Details" backHref={`/staff/${clientSlug}/customers`} />
+        <LoadingState label="Finding customer in store records…" />
       </div>
     );
   }
 
-  if (error || !customer) {
+  if (error && !customer) {
     return (
-      <div className="max-w-md mx-auto my-8 p-6 bg-white rounded-3xl border border-stone-200 text-center shadow-sm">
-        <AlertCircle className="w-12 h-12 text-red-500 mx-auto mb-3" />
-        <h2 className="text-base font-bold text-[#3A1E0D]">Customer Lookup Notice</h2>
-        <p className="text-xs text-stone-500 mt-2">{error || "Could not retrieve customer details."}</p>
-        <Link
-          href={`/staff/${clientSlug}/customers`}
-          className="mt-5 inline-flex items-center gap-2 px-5 py-2.5 bg-[#3A1E0D] text-white rounded-2xl text-xs font-bold"
-        >
-          <ChevronLeft className="w-4 h-4" />
-          <span>Back to Customers</span>
-        </Link>
+      <div className="mx-auto w-full max-w-md space-y-4">
+        <ScreenHeader title="Customer Details" backHref={`/staff/${clientSlug}/customers`} />
+        <EmptyState
+          icon={<Users />}
+          title="Customer not available"
+          message={error}
+          action={
+            <LinkButton href={`/staff/${clientSlug}/customers`} size="sm" variant="secondary">
+              Back to Customers
+            </LinkButton>
+          }
+        />
       </div>
     );
   }
+
+  if (!customer) return null;
 
   const stampTarget = customer.stampTarget || client?.stampTarget || 0;
   const stampsCount = customer.stamps;
-  const stampsRemaining = Math.max(0, stampTarget - stampsCount);
   const isRewardReady = stampsCount >= stampTarget || customer.isEligibleForReward;
   const rewardTitle = customer.rewardName || client?.rewardName || "Reward not configured";
+  const customerCode = customer.customerCode || customer.id.substring(0, 6);
+  const nextStamps = Math.min(stampsCount + 1, stampTarget);
 
-  // ==========================================
-  // VIEW 1: STAMP ADDED SUCCESS (SCREEN 6)
-  // ==========================================
+  /* ================= SCREEN 6 — STAMP ADDED ================= */
   if (viewState === "stamp_success") {
     return (
-      <div className="min-h-[80vh] flex flex-col justify-between max-w-md mx-auto py-2 select-none">
-        {/* Top Header */}
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setViewState("detail")}
-            className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs cursor-pointer"
-          >
-            <ChevronLeft className="w-6 h-6" />
-          </button>
-          <h1 className="text-base font-bold text-[#3A1E0D]">Stamp Added</h1>
-          <div className="w-10" />
-        </div>
+      <div className="mx-auto w-full max-w-md">
+        <ScreenHeader
+          title="Stamp Added"
+          backAsButton
+          onBack={() => setViewState("detail")}
+        />
 
-        {/* Center Illustration & Congrats */}
-        <div className="my-auto text-center px-4 py-6">
-          <div className="mb-4">
-            <CoffeeCupIllustration className="w-28 h-28 mx-auto" />
-          </div>
-
-          <h2 className="text-2xl font-extrabold text-[#3A1E0D] tracking-tight">
-            Stamp Added!
-          </h2>
-          <p className="text-sm font-medium text-stone-600 mt-1">
-            {customer.name} now has <span className="font-bold text-[#3A1E0D]">{stampsCount} / {stampTarget}</span> stamps
-          </p>
-
-          {/* Visual Stamp Row matching Screen 6 */}
-          <div className="my-6 p-4 bg-white rounded-2xl border border-[#EBDCCF] shadow-xs">
-            <div className="flex items-center justify-center gap-1.5 flex-wrap">
-              {Array.from({ length: stampTarget }).map((_, idx) => (
-                <SingleStampBean key={idx} isFilled={idx < stampsCount} targetNumber={idx + 1} />
-              ))}
-            </div>
-          </div>
-
-          {/* Reward Status Banner */}
-          <div className="p-3.5 bg-[#FFF8F0] border border-[#F5DEC7] rounded-2xl flex items-center justify-center gap-2.5 text-xs text-[#8C5D3B] font-semibold">
-            <Gift className="w-4 h-4 text-[#B97B32] shrink-0" />
-            <span>
-              {stampsRemaining > 0
-                ? `${stampsRemaining} more stamps for ${rewardTitle}`
-                : `Reward Ready: ${rewardTitle}`}
+        <SuccessState
+          className="min-h-[70dvh]"
+          graphic={
+            <span className="relative flex size-32 items-center justify-center">
+              <CelebrationHalo className="size-40" />
+              <CoffeeCupIllustration className="relative size-28" />
             </span>
-          </div>
-        </div>
+          }
+          title="Stamp Added!"
+          message={
+            <>
+              {customer.name.split(" ")[0]} now has{" "}
+              <span className="font-extrabold text-espresso-900">
+                {stampFraction(lastResult?.stamps ?? stampsCount, lastResult?.target ?? stampTarget)}
+              </span>{" "}
+              stamps
+            </>
+          }
+          tone="cream"
+        >
+          <LoyaltyStampProgress
+            stamps={lastResult?.stamps ?? stampsCount}
+            stampTarget={lastResult?.target ?? stampTarget}
+            rewardName={rewardTitle}
+            showHeading={false}
+            dense
+            size="sm"
+          />
+        </SuccessState>
 
-        {/* Action Buttons matching Screen 6 */}
-        <div className="space-y-2.5 pt-4">
-          <button
-            onClick={() => setViewState("detail")}
-            className="w-full py-3.5 px-4 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-lg shadow-[#3A1E0D]/10 transition-all cursor-pointer"
-          >
+        <div className="space-y-2.5 px-1 pt-2">
+          <Button size="lg" block onClick={() => setViewState("detail")}>
             View Customer
-          </button>
-          <Link
+          </Button>
+          <LinkButton
             href={`/staff/${clientSlug}/scan`}
-            className="w-full py-3.5 px-4 bg-[#F5EBE0] hover:bg-[#ECD8C8] active:scale-[0.99] text-[#3A1E0D] font-bold text-sm rounded-2xl border border-[#DFC8B4] text-center block transition-all"
+            variant="secondary"
+            size="lg"
+            block
           >
             Back to Scan
-          </Link>
+          </LinkButton>
         </div>
       </div>
     );
   }
 
-  // ==========================================
-  // VIEW 2: REWARD UNLOCKED STATE (SCREEN 7)
-  // ==========================================
+  /* ================= SCREEN 7 — REWARD UNLOCKED ================= */
   if (viewState === "reward_unlocked") {
+    const unlockedTarget = lastResult?.target ?? stampTarget;
+
     return (
-      <div className="min-h-[80vh] flex flex-col justify-between max-w-md mx-auto py-2 select-none">
-        {/* Top Header */}
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setViewState("detail")}
-            className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs cursor-pointer"
-          >
-            <ChevronLeft className="w-6 h-6" />
-          </button>
-          <h1 className="text-base font-bold text-[#3A1E0D]">Reward Unlocked</h1>
-          <div className="w-10" />
-        </div>
+      <div className="mx-auto w-full max-w-md">
+        <ScreenHeader
+          title="Reward Unlocked"
+          backAsButton
+          onBack={() => setViewState("detail")}
+        />
 
-        {/* Center Celebration */}
-        <div className="my-auto text-center px-4 py-4">
-          <div className="mb-4">
-            <GiftBoxIllustration className="w-28 h-28 mx-auto" />
-          </div>
+        <SuccessState
+          className="min-h-[64dvh]"
+          graphic={
+            <span className="relative flex size-32 items-center justify-center">
+              <CelebrationHalo className="size-40" />
+              <GiftBoxIllustration className="relative size-28" />
+            </span>
+          }
+          title="Reward Unlocked!"
+          message={
+            <>
+              This customer has completed{" "}
+              <span className="font-extrabold text-espresso-900">
+                {stampFraction(unlockedTarget, unlockedTarget)}
+              </span>{" "}
+              stamps.
+            </>
+          }
+        >
+          <RewardCard
+            ready
+            rewardName={rewardTitle}
+            status="Reward Ready for Redemption"
+            description={client?.rewardDescription}
+            imageUrl={client?.rewardImageUrl}
+          />
+        </SuccessState>
 
-          <h2 className="text-2xl font-extrabold text-[#3A1E0D] tracking-tight">
-            Reward Unlocked!
-          </h2>
-          <p className="text-xs sm:text-sm font-medium text-stone-600 mt-1">
-            This customer has completed <span className="font-bold text-[#3A1E0D]">{stampTarget} / {stampTarget}</span> stamps.
-          </p>
-
-          {/* Reward Item Card matching Screen 7 */}
-          <div className="my-6 p-4 bg-white rounded-3xl border border-[#EBDCCF] shadow-sm flex items-center gap-4 text-left">
-            <div className="w-14 h-14 rounded-2xl bg-[#FFF8F0] border border-[#F5DEC7] flex items-center justify-center shrink-0">
-              <CoffeeCupIllustration className="w-10 h-10" />
-            </div>
-            <div>
-              <h3 className="font-extrabold text-base text-[#3A1E0D]">{rewardTitle}</h3>
-              <p className="text-xs text-emerald-700 font-semibold mt-0.5 flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Reward Ready for Redemption
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Action Buttons matching Screen 7 */}
-        <div className="space-y-2.5 pt-4">
-          <button
+        <div className="space-y-2.5 px-1 pt-2">
+          <Button
+            size="lg"
+            block
+            disabled={isSubmitting}
             onClick={() => setShowRedeemConfirmModal(true)}
-            className="w-full py-3.5 px-4 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-lg shadow-[#3A1E0D]/10 transition-all flex items-center justify-center gap-2 cursor-pointer"
+            iconRight={<ArrowRight className="text-caramel-300" />}
           >
-            <span>Mark as Redeemed</span>
-            <ArrowRight className="w-4 h-4 text-[#E6B875]" />
-          </button>
-          <button
-            onClick={() => setViewState("detail")}
-            className="w-full py-3.5 px-4 bg-[#F5EBE0] hover:bg-[#ECD8C8] text-[#3A1E0D] font-bold text-sm rounded-2xl border border-[#DFC8B4] text-center block transition-all cursor-pointer"
-          >
+            Mark as Redeemed
+          </Button>
+          <Button variant="secondary" size="lg" block onClick={() => setViewState("detail")}>
             View Customer
-          </button>
+          </Button>
         </div>
+
+        {/* SCREEN 8 — Redeem confirmation */}
+        <RedeemModal
+          open={showRedeemConfirmModal}
+          customer={customer}
+          customerCode={customerCode}
+          rewardTitle={rewardTitle}
+          rewardImageUrl={client?.rewardImageUrl}
+          stampTarget={stampTarget}
+          submitting={isSubmitting}
+          onConfirm={() => void handleConfirmRedeem()}
+          onCancel={() => setShowRedeemConfirmModal(false)}
+        />
       </div>
     );
   }
 
-  // ==========================================
-  // VIEW 3: CUSTOMER DETAILS DEFAULT (SCREEN 4 & 10)
-  // ==========================================
+  /* ============ SCREENS 4 & 10 — CUSTOMER DETAILS ============ */
   return (
-    <div className="max-w-md mx-auto space-y-4 pb-4 select-none">
-      {/* Top Header */}
-      <div className="flex items-center justify-between">
-        <Link
-          href={`/staff/${clientSlug}/customers`}
-          className="w-10 h-10 rounded-full bg-white border border-[#EBDCCF] flex items-center justify-center text-[#3A1E0D] hover:bg-[#FAF4ED] shadow-xs transition-colors"
-        >
-          <ChevronLeft className="w-6 h-6" />
-        </Link>
-        <h1 className="text-base sm:text-lg font-bold text-[#3A1E0D]">
-          Customer Details
-        </h1>
-        <div className="w-10" />
-      </div>
+    <div className="mx-auto w-full max-w-md space-y-4">
+      <ScreenHeader title="Customer Details" backHref={`/staff/${clientSlug}/customers`} />
 
-      {/* Customer Profile Header (Screen 4 / Screen 10) */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs flex items-center gap-4">
-        <div
-          className="w-14 h-14 rounded-full flex items-center justify-center font-extrabold text-xl text-[#3A1E0D] shadow-inner shrink-0"
-          style={{ backgroundColor: customer.avatarBg || "#E8D5C4" }}
-        >
-          {customer.avatarInitial || customer.name.charAt(0)}
-        </div>
-        <div className="flex-1 min-w-0">
-          <h2 className="text-lg font-extrabold text-[#3A1E0D] leading-tight truncate">
+      {error && (
+        <ErrorState
+          inline
+          message={error}
+          onRetry={() => void fetchCustomer()}
+          retryLabel="Reload"
+        />
+      )}
+
+      {/* Identity card */}
+      <Card radius="xl" className="flex items-center gap-3.5 p-4">
+        <CustomerAvatar name={customer.name} tint={customer.avatarBg} size="lg" />
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[1.1rem] font-extrabold leading-tight text-espresso-900">
             {customer.name}
           </h2>
-          <p className="text-xs text-stone-500 font-medium">
-            Customer #{customer.customerCode || customer.id.substring(0, 6)}
+          <p className="mt-1 truncate text-[0.74rem] font-semibold text-espresso-400">
+            #{customerCode}
           </p>
-          <p className="text-[11px] text-stone-400 mt-0.5 truncate">
-            {customer.tableNumber || "Table not provided"} • Visiting since {customer.visitingSince || "Not provided"}
-          </p>
+          {/* Table information only when it exists in the actual data. */}
+          {customer.tableNumber && (
+            <p className="mt-1 inline-flex items-center gap-1 rounded-xs bg-sand-100 px-1.5 py-0.5 text-[0.66rem] font-bold text-espresso-600">
+              Table {customer.tableNumber}
+            </p>
+          )}
         </div>
-      </div>
-
-      {/* Loyalty Stamps Card (Screen 4 / Screen 10) */}
-      <div className="bg-white rounded-3xl p-5 border border-[#EBDCCF] shadow-xs space-y-4">
-        {/* Header with Stamp Fraction */}
-        <div className="flex items-center justify-between">
-          <span className="font-bold text-sm text-[#3A1E0D]">Loyalty Stamps</span>
-          <span className="font-extrabold text-base text-[#3A1E0D]">
-            {stampsCount} / {stampTarget}
+        {isRewardReady && (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-leaf-100 px-2 py-1 text-[0.64rem] font-extrabold uppercase tracking-wide text-leaf-700">
+            <Gift className="size-3" aria-hidden="true" />
+            Ready
           </span>
-        </div>
+        )}
+      </Card>
 
-        {/* Coffee Bean Stamp Indicators Grid */}
-        <div className="py-2">
-          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2.5 justify-items-center">
-            {Array.from({ length: stampTarget }).map((_, idx) => (
-              <SingleStampBean key={idx} isFilled={idx < stampsCount} targetNumber={idx + 1} />
-            ))}
-          </div>
-        </div>
+      {/* Loyalty block */}
+      <Card radius="xl" className="space-y-4 p-4 sm:p-5">
+        <LoyaltyStampProgress
+          stamps={stampsCount}
+          stampTarget={stampTarget}
+          rewardName={rewardTitle}
+        />
 
-        {/* Milestone / Reward Banner */}
-        {isRewardReady ? (
-          <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center shrink-0 text-emerald-700">
-              <Gift className="w-4 h-4" />
-            </div>
-            <div>
-              <div className="font-bold text-xs text-emerald-900">Reward Available!</div>
-              <div className="text-[11px] text-emerald-700">{rewardTitle}</div>
-            </div>
-          </div>
-        ) : (
-          <div className="p-3.5 bg-[#FFF8F0] border border-[#F5DEC7] rounded-2xl flex items-center gap-3">
-            <Gift className="w-5 h-5 text-[#B97B32] shrink-0" />
-            <span className="text-xs text-[#8C5D3B] font-semibold">
-              {stampsRemaining} more {stampsRemaining === 1 ? "stamp" : "stamps"} for {rewardTitle}
-            </span>
-          </div>
+        {isRewardReady && (
+          <RewardCard
+            ready
+            size="sm"
+            rewardName={rewardTitle}
+            status="Reward Ready for Redemption"
+            imageUrl={client?.rewardImageUrl}
+          />
         )}
 
-        {/* Info Rows matching Screen 4 / 10 */}
-        <div className="pt-2 divide-y divide-stone-100 text-xs">
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500 flex items-center gap-1.5 font-medium">
-              <Clock className="w-3.5 h-3.5 text-stone-400" /> Last Stamp
-            </span>
-            <span className="font-semibold text-stone-800">
-              {customer.lastStampAt || "Today"}
-            </span>
-          </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500 flex items-center gap-1.5 font-medium">
-              <RotateCcw className="w-3.5 h-3.5 text-stone-400" /> Total Visits
-            </span>
-            <span className="font-semibold text-stone-800">
-              {customer.totalVisits} {customer.totalVisits === 1 ? "time" : "times"}
-            </span>
-          </div>
-          <div className="py-2.5 flex items-center justify-between">
-            <span className="text-stone-500 flex items-center gap-1.5 font-medium">
-              <ShieldCheck className="w-3.5 h-3.5 text-stone-400" /> Status
-            </span>
-            {isRewardReady ? (
-              <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[11px]">
-                Eligible for Reward
+        <div className="divide-y divide-line-soft border-t border-line-soft pt-1">
+          <InfoRow
+            icon={<Clock />}
+            label="Last Stamp"
+            value={customer.lastStampAt || customer.lastVisitAt || "—"}
+          />
+          <InfoRow
+            icon={<RotateCcw />}
+            label="Total Visits"
+            value={`${customer.totalVisits} ${customer.totalVisits === 1 ? "visit" : "visits"}`}
+          />
+          <InfoRow
+            icon={<CalendarDays />}
+            label="Customer Since"
+            value={customer.visitingSince || customer.createdAt || "—"}
+          />
+          <InfoRow
+            icon={<ShieldCheck />}
+            label="Status"
+            value={
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-md px-2 py-1 text-[0.68rem] font-extrabold",
+                  isRewardReady
+                    ? "bg-leaf-100 text-leaf-700"
+                    : "bg-sand-100 text-espresso-500"
+                )}
+              >
+                {isRewardReady ? "Eligible for Reward" : "Not Eligible Yet"}
               </span>
-            ) : (
-              <span className="px-2.5 py-1 rounded-full bg-[#FAF3EC] text-[#8C5D3B] font-bold text-[11px] border border-[#EBDCCF]">
-                Not Eligible Yet
-              </span>
-            )}
-          </div>
+            }
+          />
         </div>
-      </div>
+      </Card>
 
-      {/* Primary Action Button (Add 1 Stamp vs Mark as Redeemed) */}
-      <div className="pt-2">
+      {/* Primary action */}
+      <div className="pt-1">
         {isRewardReady ? (
-          <button
-            type="button"
+          <Button
+            size="lg"
+            block
             disabled={isSubmitting}
             onClick={() => setShowRedeemConfirmModal(true)}
-            className="w-full py-4 px-4 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-lg shadow-[#3A1E0D]/15 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-70"
+            iconRight={<ArrowRight className="text-caramel-300" />}
           >
-            <span>Mark as Redeemed</span>
-            <ArrowRight className="w-4 h-4 text-[#E6B875]" />
-          </button>
+            Mark as Redeemed
+          </Button>
         ) : (
-          <button
-            type="button"
-            disabled={isSubmitting}
+          <Button
+            size="lg"
+            block
+            disabled={isSubmitting || !client?.loyaltyEnabled}
             onClick={() => setShowConfirmStampModal(true)}
-            className="w-full py-4 px-4 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl shadow-lg shadow-[#3A1E0D]/15 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-70"
+            iconLeft={<Gift className="text-caramel-300" />}
           >
-            <span>Add 1 Stamp</span>
-            <ArrowRight className="w-4 h-4 text-[#E6B875]" />
-          </button>
+            Add 1 Stamp
+          </Button>
+        )}
+        {client && !client.loyaltyEnabled && !isRewardReady && (
+          <p className="mt-2 text-center text-[0.7rem] font-medium text-espresso-400">
+            The loyalty programme is disabled for this business.
+          </p>
         )}
       </div>
 
-      {/* ==========================================
-          MODAL 1: ADD 1 STAMP CONFIRMATION (SCREEN 5)
-          ========================================== */}
-      {showConfirmStampModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl border border-stone-200 animate-in zoom-in-95 duration-150">
-            {/* Coffee cup illustration with sparkles (Screen 5) */}
-            <div className="mb-3">
-              <CoffeeCupIllustration className="w-20 h-20 mx-auto" />
-            </div>
+      <Link
+        href={`/staff/${clientSlug}/customers`}
+        className="press-scale mx-auto flex w-fit items-center gap-1 text-[0.74rem] font-bold text-espresso-400 hover:text-espresso-700"
+      >
+        Back to Customer Lookup
+        <ChevronRight className="size-3.5" aria-hidden="true" />
+      </Link>
 
-            <h3 className="text-lg font-extrabold text-[#3A1E0D]">
-              Add 1 Loyalty Stamp?
-            </h3>
-            <p className="text-xs text-stone-600 mt-2 leading-relaxed">
-              This will add 1 stamp to <span className="font-bold text-[#3A1E0D]">{customer.name}</span>&apos;s loyalty account.
-            </p>
-
-            {/* Buttons (Screen 5) */}
-            <div className="mt-6 space-y-2">
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleConfirmAddStamp}
-                className="w-full py-3.5 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#E6B875]" />
-                ) : (
-                  <span>Confirm</span>
-                )}
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => setShowConfirmStampModal(false)}
-                className="w-full py-3 bg-[#F5EBE0] hover:bg-[#ECD8C8] text-[#3A1E0D] font-bold text-xs rounded-2xl border border-[#DFC8B4] transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
+      {/* ============ SCREEN 5 — CONFIRM STAMP ============ */}
+      <ConfirmModal
+        open={showConfirmStampModal}
+        title="Add 1 Loyalty Stamp?"
+        description={
+          <>
+            This adds one stamp to{" "}
+            <span className="font-bold text-espresso-800">{customer.name}</span>&apos;s loyalty
+            account and counts the visit.
+          </>
+        }
+        hero={<CoffeeCupIllustration className="size-20" />}
+        confirmLabel="Confirm"
+        submitting={isSubmitting}
+        onConfirm={() => void handleConfirmAddStamp()}
+        onCancel={() => {
+          if (isSubmitting) return;
+          setShowConfirmStampModal(false);
+        }}
+      >
+        <div className="rounded-lg border border-line bg-cream-100 p-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <span className="flex min-w-0 items-center gap-2">
+              <CustomerAvatar name={customer.name} tint={customer.avatarBg} size="xs" />
+              <span className="truncate text-[0.78rem] font-bold text-espresso-900">
+                {customer.name}
+              </span>
+            </span>
+            <span className="shrink-0 text-[0.78rem] font-semibold tabular-nums text-espresso-500">
+              {stampFraction(stampsCount, stampTarget)}
+              <ChevronRight className="mx-1 inline size-3 text-espresso-300" aria-hidden="true" />
+              <span className="font-extrabold text-leaf-700">
+                {stampFraction(nextStamps, stampTarget)}
+              </span>
+            </span>
           </div>
         </div>
-      )}
+      </ConfirmModal>
 
-      {/* ==========================================
-          MODAL 2: REDEEM REWARD CONFIRMATION (SCREEN 8)
-          ========================================== */}
-      {showRedeemConfirmModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl border border-stone-200 animate-in zoom-in-95 duration-150">
-            {/* Customer Pill info */}
-            <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#EBDCCF] flex items-center gap-3 mb-4 text-left">
-              <div
-                className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm text-[#3A1E0D]"
-                style={{ backgroundColor: customer.avatarBg || "#E8D5C4" }}
-              >
-                {customer.avatarInitial}
-              </div>
-              <div>
-                <h4 className="font-bold text-xs text-[#3A1E0D]">{customer.name}</h4>
-                <p className="text-[10px] text-stone-500">Customer #{customer.customerCode || customer.id.substring(0, 6)}</p>
-              </div>
-            </div>
-
-            {/* Reward item thumbnail (Screen 8) */}
-            <div className="p-3 bg-[#FFF8F0] border border-[#F5DEC7] rounded-2xl flex items-center gap-3 text-left mb-4">
-              <div className="w-10 h-10 rounded-xl bg-white flex items-center justify-center shrink-0">
-                <CoffeeCupIllustration className="w-8 h-8" />
-              </div>
-              <div>
-                <div className="font-bold text-xs text-[#3A1E0D]">{rewardTitle}</div>
-                <div className="text-[10px] text-stone-500">Reward</div>
-              </div>
-            </div>
-
-            <p className="text-xs text-stone-600 leading-relaxed">
-              Mark this reward as redeemed? This will reset the customer&apos;s stamps to <span className="font-bold text-[#3A1E0D]">0 / {stampTarget}</span> after redemption.
-            </p>
-
-            {/* Buttons (Screen 8) */}
-            <div className="mt-6 space-y-2">
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={handleConfirmRedeem}
-                className="w-full py-3.5 bg-[#3A1E0D] hover:bg-[#4E2A14] active:scale-[0.99] text-white font-bold text-sm rounded-2xl transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="w-4 h-4 animate-spin text-[#E6B875]" />
-                ) : (
-                  <span>Confirm Redemption</span>
-                )}
-              </button>
-              <button
-                type="button"
-                disabled={isSubmitting}
-                onClick={() => setShowRedeemConfirmModal(false)}
-                className="w-full py-3 bg-[#F5EBE0] hover:bg-[#ECD8C8] text-[#3A1E0D] font-bold text-xs rounded-2xl border border-[#DFC8B4] transition-all cursor-pointer"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* ============ SCREEN 8 — REDEEM REWARD ============ */}
+      <RedeemModal
+        open={showRedeemConfirmModal}
+        customer={customer}
+        customerCode={customerCode}
+        rewardTitle={rewardTitle}
+        rewardImageUrl={client?.rewardImageUrl}
+        stampTarget={stampTarget}
+        submitting={isSubmitting}
+        onConfirm={() => void handleConfirmRedeem()}
+        onCancel={() => setShowRedeemConfirmModal(false)}
+      />
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Redeem Reward confirmation (screen 8) — shared by screens 7 and 10.
+ * ------------------------------------------------------------------ */
+function RedeemModal({
+  open,
+  customer,
+  customerCode,
+  rewardTitle,
+  rewardImageUrl,
+  stampTarget,
+  submitting,
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  customer: CustomerProfile;
+  customerCode: string;
+  rewardTitle: string;
+  rewardImageUrl?: string | null;
+  stampTarget: number;
+  submitting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <ConfirmModal
+      open={open}
+      title="Mark this reward as redeemed?"
+      description={
+        <>
+          This will reset the customer&apos;s stamps to{" "}
+          <span className="font-bold text-espresso-800">
+            {stampFraction(0, stampTarget)}
+          </span>{" "}
+          after redemption.
+        </>
+      }
+      confirmLabel="Confirm Redemption"
+      submitting={submitting}
+      onConfirm={onConfirm}
+      onCancel={() => {
+        if (submitting) return;
+        onCancel();
+      }}
+    >
+      <div className="rounded-lg border border-line bg-cream-100 p-3">
+        <div className="flex items-center gap-2.5">
+          <CustomerAvatar name={customer.name} tint={customer.avatarBg} size="sm" />
+          <div className="min-w-0">
+            <p className="truncate text-[0.82rem] font-bold text-espresso-900">{customer.name}</p>
+            <p className="truncate text-[0.7rem] font-medium text-espresso-400">
+              Customer #{customerCode}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <RewardCard
+        size="sm"
+        rewardName={rewardTitle}
+        status="Reward"
+        imageUrl={rewardImageUrl}
+      />
+    </ConfirmModal>
   );
 }
