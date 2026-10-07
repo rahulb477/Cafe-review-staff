@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState, use } from "react";
 import { ChevronDown, Clock, ShieldCheck } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { timestampToMillis } from "@/lib/format";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
@@ -56,9 +57,13 @@ export default function RecentActivityPage({
         if (!active) return;
         // Newest first — the ledger listener already orders by createdAt desc.
         setActivities(
-          [...liveItems].sort(
-            (a, b) => Date.parse(b.timestamp || "") - Date.parse(a.timestamp || "")
-          )
+          [...liveItems].sort((a, b) => {
+            const aMillis = timestampToMillis(a.timestamp);
+            const bMillis = timestampToMillis(b.timestamp);
+            if (aMillis === undefined) return bMillis === undefined ? 0 : 1;
+            if (bMillis === undefined) return -1;
+            return bMillis - aMillis;
+          })
         );
         setErrorMessage(null);
         setIsLoading(false);

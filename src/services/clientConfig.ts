@@ -59,6 +59,13 @@ export function nonNegativeInt(value: unknown): number {
   return Math.floor(parsed);
 }
 
+/** Missing or malformed counts stay missing in display models instead of becoming NaN/0. */
+export function nonNegativeIntOrUndefined(value: unknown): number | undefined {
+  const parsed = numberValue(value);
+  if (parsed === undefined || parsed < 0 || !Number.isInteger(parsed)) return undefined;
+  return parsed;
+}
+
 export function firstString(...values: unknown[]): string | undefined {
   for (const value of values) {
     const resolved = stringValue(value);
@@ -237,7 +244,16 @@ export function resolveLoyaltyState(
   customerId: string,
   clientId: string,
   loyaltyData: unknown
-): { belongsToClient: boolean; stamps: number; stampTarget?: number; rewardName?: string; lastStampAt?: unknown } {
+): {
+  belongsToClient: boolean;
+  stamps: number;
+  lifetimeStamps?: number;
+  rewardsEarned?: number;
+  rewardsRedeemed?: number;
+  stampTarget?: number;
+  rewardName?: string;
+  lastStampAt?: unknown;
+} {
   const record = asRecord(loyaltyData);
   const docClientId = stringValue(record.clientId);
   const docCustomerId = stringValue(record.customerId);
@@ -251,7 +267,11 @@ export function resolveLoyaltyState(
 
   return {
     belongsToClient: true,
-    stamps: nonNegativeInt(record.stamps),
+    // `stamps` remains a legacy alias used by the customer-facing platform.
+    stamps: nonNegativeInt(record.currentStamps ?? record.stamps),
+    lifetimeStamps: nonNegativeIntOrUndefined(record.lifetimeStamps),
+    rewardsEarned: nonNegativeIntOrUndefined(record.rewardsEarned ?? record.totalRewardsEarned),
+    rewardsRedeemed: nonNegativeIntOrUndefined(record.rewardsRedeemed ?? record.totalRewardsRedeemed),
     stampTarget: numberValue(record.stampTarget),
     rewardName: stringValue(record.rewardName),
     lastStampAt: record.lastStampAt,
@@ -310,8 +330,18 @@ export function isStampLedgerEntry(data: unknown): boolean {
   const record = asRecord(data);
   const type = stringValue(record.type);
   if (type === "REWARD_REDEEMED" || type === "REWARD") return false;
-  if (type === "STAMP_ADDED") return record.visitCounted !== false;
-  const delta = numberValue(record.delta);
-  if (delta !== undefined) return delta >= 1;
-  return true;
+  if (type === "STAMP_ADDED") {
+    return (
+      (record.visitCounted === undefined || record.visitCounted === true) &&
+      (record.delta === undefined || numberValue(record.delta) === 1) &&
+      (record.addedCount === undefined || nonNegativeIntOrUndefined(record.addedCount) === 1)
+    );
+  }
+  if (type) return false;
+  // Older activity rows may not have a type, but only an explicit +1 delta is
+  // safe to count as a single normal stamp; unknown/empty rows are not data.
+  return (
+    numberValue(record.delta) === 1 &&
+    (record.visitCounted === undefined || record.visitCounted === true)
+  );
 }

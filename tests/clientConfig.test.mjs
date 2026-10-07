@@ -241,7 +241,8 @@ test("stamp ledger rows are distinguished from pending visits and reward redempt
   assert.equal(isStampLedgerEntry({ type: "STAMP_ADDED", delta: 1, visitCounted: true }), true);
   assert.equal(isStampLedgerEntry({ type: "STAMP_ADDED", delta: 1 }), true);
   assert.equal(isStampLedgerEntry({ delta: 1 }), true);
-  assert.equal(isStampLedgerEntry({}), true);
+  assert.equal(isStampLedgerEntry({}), false);
+  assert.equal(isStampLedgerEntry({ type: "OTHER", delta: 1 }), false);
   assert.equal(isStampLedgerEntry({ type: "REWARD_REDEEMED", delta: -8 }), false);
   assert.equal(isStampLedgerEntry({ delta: -8 }), false);
   assert.equal(isStampLedgerEntry({ type: "REWARD_REDEEMED" }), false);

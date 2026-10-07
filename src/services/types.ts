@@ -39,13 +39,18 @@ export interface StaffUser {
 }
 
 export interface CustomerProfile {
-  /** Document id in customers/{customerId} (the customer's Firebase Auth uid). */
+  /** Firestore document id in customers/{customerId}; internal routing key only. */
   id: string;
+  /** Canonical customerId (currently the customers document id). */
+  customerId: string;
+  /** Firebase Auth UID, kept separate from the human-readable customer code. */
   uid?: string;
   clientId: string;
   clientSlug?: string;
-  /** Display code (`code` / `customerCode`, falling back to the document id). */
+  /** Human-readable code from code/customerCode/displayId; never a Firebase UID. */
   customerCode?: string;
+  /** Human-facing identifier as stored by the customer app. */
+  displayId?: string;
   name: string;
   email?: string;
   phone?: string;
@@ -53,8 +58,9 @@ export interface CustomerProfile {
   phoneIndexId?: string;
   tableNumber?: string;
   visitingSince?: string;
-  totalVisits: number;
+  totalVisits?: number;
   lastVisitAt?: string;
+  lastVisitAtMillis?: number;
   lastVisitTransactionId?: string;
   qrToken?: string;
   status?: string;
@@ -64,14 +70,14 @@ export interface CustomerProfile {
   stampTarget: number;
   rewardName: string;
   isEligibleForReward: boolean;
+  lifetimeStamps?: number;
+  rewardsEarned?: number;
+  rewardsRedeemed?: number;
   lastStampAt?: string;
+  lastStampAtMillis?: number;
   updatedAt?: string;
   createdAt?: string;
-  /**
-   * Newest of lastStampAt / lastVisitAt / updatedAt / createdAt in epoch ms.
-   * Presentation only (relative "2 mins ago" in the lookup list) — derived
-   * from the same Firestore fields, never stored or invented.
-   */
+  /** Latest activity timestamp for display-only sorting; normally lastVisitAt. */
   lastActivityMillis?: number;
 }
 

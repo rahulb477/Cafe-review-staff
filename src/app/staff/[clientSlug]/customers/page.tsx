@@ -217,10 +217,7 @@ export default function CustomerLookupPage({
               <CustomerCard
                 customer={customer}
                 href={`/staff/${clientSlug}/customers/${customer.id}`}
-                activityMillis={customer.lastActivityMillis}
-                activityFallback={`${customer.totalVisits} ${
-                  customer.totalVisits === 1 ? "visit" : "visits"
-                }`}
+                activityMillis={customer.lastVisitAtMillis}
               />
             </li>
           ))}

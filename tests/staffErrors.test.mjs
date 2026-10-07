@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   STAFF_ERROR_MESSAGES,
+  StampCooldownError,
   StaffServiceError,
   describeErrorForDiagnostics,
   isMissingIndexError,
@@ -140,4 +141,25 @@ test("preserves an existing staff error and only merges new technical detail", (
   assert.equal(merged.message, STAFF_ERROR_MESSAGES.CROSS_BUSINESS);
   assert.equal(merged.technical.path, "customerTokens/t");
   assert.equal(merged.technical.detail, "extra");
+});
+
+test("cooldown failures preserve structured server-rejection details", () => {
+  const lastStampAt = { seconds: 1_800_000_000 };
+  const nextStampAt = { seconds: 1_800_043_200 };
+  const cooldown = new StampCooldownError({
+    lastStampAt,
+    nextStampAt,
+    remainingMs: 17 * 60_000,
+    message: "Stamp already added recently. Next stamp available in 17m.",
+    technical: { code: "permission-denied" },
+  });
+  const mapped = toStaffServiceError(cooldown, "UNKNOWN");
+  assert.ok(mapped instanceof StampCooldownError);
+  assert.equal(mapped.staffCode, "STAMP_COOLDOWN");
+  assert.deepEqual(mapped.details, {
+    reason: "STAMP_COOLDOWN",
+    lastStampAt,
+    nextStampAt,
+    remainingMs: 17 * 60_000,
+  });
 });
