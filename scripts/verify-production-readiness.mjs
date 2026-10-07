@@ -251,35 +251,53 @@ check("scanner stops every media track and the decode loop", () => {
   return missing.length === 0 ? true : `missing: ${missing.join(", ")}`;
 });
 
-check("stamp visits are written in the two-phase canonical order", () => {
+check("stamp visits use an uncounted phase-one row and one atomic counted phase", () => {
   const service = read("src/services/firebaseService.ts");
-  // PHASE 1 appends the row uncounted: the rules pair an EXISTING uncounted
-  // transaction with the customer update via get()/getAfter().
   if (!/visitCounted: false/.test(service)) return "ledger row is not appended as uncounted";
-  if (!/visitCounted: true, visitCountedAt: serverTimestamp\(\)/.test(service)) {
+  if (!/visitCounted:\s*true,[\s\S]{0,180}visitCountedAt:\s*serverTimestamp\(\)/.test(service)) {
     return "the counted-transaction update is missing";
   }
-  if (!/applyStampVisit\(visitArgs, \{ markCounted: true \}\)/.test(service)) {
-    return "the canonical counted path is not attempted first";
+  if (!/stampCountBefore: previousStamps,[\s\S]*?stampCountAfter: newStamps/.test(service)) {
+    return "the counted ledger row does not capture the final concurrent stamp balance";
   }
-  if (!/markCounted: false/.test(service)) return "no append-only fallback for stricter rulesets";
-  if (!/lastVisitTransactionId\) === transactionId/.test(service)) {
-    return "no cross-ruleset idempotency marker";
+  if (!/outcome = await this\.applyStampVisit\(visitArgs\)/.test(service)) {
+    return "the canonical atomic visit transaction is not called";
+  }
+  if (/markCounted:\s*false|append-only visit write/.test(service)) {
+    return "a fallback bypasses the counted transaction rule";
+  }
+  if (!/stampVisitAlreadyApplied\(/.test(service) || !/lastVisitTransactionId: transactionId/.test(service)) {
+    return "durable idempotency markers are missing";
+  }
+  if (!/staffId: session\.uid,[\s\S]*?staffUid: session\.uid/.test(service)) {
+    return "stamp rows do not record the authenticated UID";
   }
   return true;
 });
 
-check("today's metrics are scoped Firestore queries, not totals", () => {
+check("dashboard customer count is client-scoped and its exact composite index is shipped", () => {
   const service = read("src/services/firebaseService.ts");
-  if (!/where\("createdAt", ">=", startOfToday\)/.test(service)) return "today's ledger window is missing";
-  if (!/where\("clientId", "==", clientId\),\s*\n\s*where\("createdAt", ">=", startOfToday\)/.test(service)) {
-    return "today's customers count is not scoped by clientId + createdAt";
+  const queries = read("src/services/firestoreQueries.ts");
+  if (!/where\("createdAt", ">=", startOfToday\)/.test(queries)) return "today's customer lower bound is missing";
+  if (!/where\("createdAt", "<", endOfTodayExclusive\)/.test(queries)) return "today's customer upper bound is missing";
+  if (!/where\("clientId", "==", safeClientId\)/.test(queries)) return "customer scope builder lacks clientId equality";
+  if (!/orderBy\("createdAt", "asc"\)/.test(queries)) return "customer count order is not explicit";
+  if (!/buildTodayCustomersCountQuery\(firestore, clientId, startOfToday\)/.test(service)) {
+    return "dashboard count does not use the scoped query builder";
   }
-  if (!/customersAvailable/.test(service)) return "today's customers has no honest unavailable state";
-  if (/getCountFromServer\(\s*query\(collection\(firestore, COLLECTIONS\.customers\), where\("clientId", "==", clientId\)\)\s*\)/.test(service)) {
-    return "the dashboard still uses the total customer count as a daily metric";
+  if (!/customersAvailable/.test(service) || !/todayCustomers = null/.test(service)) {
+    return "unavailable customer count is not represented honestly";
   }
-  return true;
+  const indexes = JSON.parse(read("firestore.indexes.json"));
+  const requiredIndex = indexes.indexes.some((index) =>
+    index.collectionGroup === "customers" &&
+    index.queryScope === "COLLECTION" &&
+    JSON.stringify(index.fields) === JSON.stringify([
+      { fieldPath: "clientId", order: "ASCENDING" },
+      { fieldPath: "createdAt", order: "ASCENDING" },
+    ])
+  );
+  return requiredIndex ? true : "missing customers (clientId ASC, createdAt ASC) composite index";
 });
 
 check("scanner lock prevents duplicate processing and auto-restart", () => {

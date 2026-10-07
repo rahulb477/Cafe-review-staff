@@ -35,7 +35,7 @@ export default function CustomerLookupPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { clientId } = useStaffApp();
+  const { status, session, clientId } = useStaffApp();
 
   const [searchQuery, setSearchQuery] = useState("");
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
@@ -44,6 +44,7 @@ export default function CustomerLookupPage({
   const [activeTab, setActiveTab] = useState<FilterTab>("all");
 
   const fetchCustomers = useCallback(async (term: string) => {
+    if (status !== "authorized" || !session?.uid || !clientId) return;
     setIsLoading(true);
     try {
       const list = await FirebaseService.getCustomers({ search: term });
@@ -57,16 +58,16 @@ export default function CustomerLookupPage({
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [status, session?.uid, clientId]);
 
   // Debounced search — one Firestore query per settled term, not per keystroke.
   useEffect(() => {
-    if (!clientId) return;
+    if (status !== "authorized" || !session?.uid || !clientId) return;
     const handle = window.setTimeout(() => {
       void fetchCustomers(searchQuery);
     }, searchQuery ? 300 : 0);
     return () => window.clearTimeout(handle);
-  }, [clientId, fetchCustomers, searchQuery]);
+  }, [status, session?.uid, clientId, fetchCustomers, searchQuery]);
 
   const visibleCustomers = customers.filter((customer) => {
     if (activeTab === "reward_ready") {

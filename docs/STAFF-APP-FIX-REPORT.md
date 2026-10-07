@@ -1,11 +1,11 @@
 # Staff App — Functionality Fix Report (A–Z)
 
-> **Note (superseded in part).** This report covers the *functionality* pass and states that the
-> UI was deliberately left untouched. The UI has since been redesigned — see
-> [`STAFF-APP-UI-REDESIGN.md`](./STAFF-APP-UI-REDESIGN.md). Everything below about Firebase,
-> authorization, paths, the scanner lifecycle, the two-phase visit write, notifications and the
-> ruleset is still current; only sections **R** and **V**'s "UI preserved" claim and the two
-> matching readiness checks have been replaced by design-system checks.
+> **Historical / superseded.** This is an older snapshot and is **not** authoritative for current
+> Firebase deployment or production status. Its claims about rules/indexes already deployed, live
+> rules missing notification/QR paths, legacy `clientIds[]` identity fallback, and the stamp
+> append-only fallback are stale or were never verified against production. Use the current
+> [`FIREBASE-DATA-FIX-REPORT.md`](./FIREBASE-DATA-FIX-REPORT.md) for the checked-in behavior,
+> validation results, deployment status, and production-test limitations.
 
 Repository: `rahulb477/Cafe-review-staff` · branch `arena/99bf539f-cafe-review-staff`
 Firebase project: **`cafe-review7`** (unchanged — no new project, database or auth system)

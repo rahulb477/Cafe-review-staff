@@ -21,6 +21,8 @@ export type StaffErrorCode =
   | "INVALID_QR"
   | "TOKEN_NOT_LINKED"
   | "NETWORK"
+  | "MISSING_INDEX"
+  | "NOT_FOUND"
   | "AUTH_REQUIRED"
   | "AUTH_FAILED"
   | "AUTH_DISABLED"
@@ -45,6 +47,8 @@ export const STAFF_ERROR_MESSAGES: Record<StaffErrorCode, string> = {
   INVALID_QR: "Invalid customer QR code.",
   TOKEN_NOT_LINKED: "Invalid customer QR code.",
   NETWORK: "Connection problem. Please try again.",
+  MISSING_INDEX: "Data index is being prepared. Please try again shortly.",
+  NOT_FOUND: "No customer data was found.",
   AUTH_REQUIRED: "Please sign in to continue.",
   AUTH_FAILED: "Invalid email or password.",
   AUTH_DISABLED: "Your staff account is inactive.",
@@ -139,6 +143,18 @@ export function isUnauthenticatedError(error: unknown): boolean {
   return code.includes("unauthenticated") || code.includes("auth/argument-error");
 }
 
+/** Firestore uses failed-precondition for missing composite indexes. */
+export function isMissingIndexError(error: unknown): boolean {
+  const code = readErrorCode(error).toLowerCase();
+  const message = readErrorMessage(error).toLowerCase();
+  return (
+    (code === "failed-precondition" || code.endsWith("/failed-precondition")) &&
+    /(?:query requires an index|requires an index|index (?:is )?(?:missing|building|not ready)|missing (?:a )?composite index)/i.test(
+      message
+    )
+  );
+}
+
 export function isOfflineError(error: unknown): boolean {
   const code = readErrorCode(error);
   const message = readErrorMessage(error).toLowerCase();
@@ -193,6 +209,8 @@ export function toStaffServiceError(
 
   if (isFirebaseConfigError(error)) return staffError("FIREBASE_CONFIG", base);
   if (isPermissionDeniedError(error)) return staffError("PERMISSION_DENIED", base);
+  if (isMissingIndexError(error)) return staffError("MISSING_INDEX", base);
+  if (code === "not-found" || code.endsWith("/not-found")) return staffError("NOT_FOUND", base);
   if (isUnauthenticatedError(error)) return staffError("AUTH_REQUIRED", base);
   if (isOfflineError(error)) return staffError("NETWORK", base);
 

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState, use } from "react";
+import React, { useCallback, useEffect, useRef, useState, use } from "react";
 import Link from "next/link";
 import confetti from "canvas-confetti";
 import {
@@ -106,6 +106,8 @@ export default function CustomerDetailPage({
     target: number;
     rewardUnlocked: boolean;
   } | null>(null);
+  const stampOperationRef = useRef<{ customerId: string; id: string } | null>(null);
+  const rewardOperationRef = useRef<{ customerId: string; id: string } | null>(null);
 
   const fetchCustomer = useCallback(async () => {
     setIsLoading(true);
@@ -128,11 +130,13 @@ export default function CustomerDetailPage({
   // Deferred a tick so the effect body never calls setState synchronously
   // (React Compiler rule) while the load still starts on mount.
   useEffect(() => {
+    if (stampOperationRef.current?.customerId !== customerId) stampOperationRef.current = null;
+    if (rewardOperationRef.current?.customerId !== customerId) rewardOperationRef.current = null;
     const handle = window.setTimeout(() => {
       void fetchCustomer();
     }, 0);
     return () => window.clearTimeout(handle);
-  }, [fetchCustomer]);
+  }, [customerId, fetchCustomer]);
 
   const triggerConfetti = () => {
     try {
@@ -153,9 +157,15 @@ export default function CustomerDetailPage({
     setIsSubmitting(true);
 
     try {
-      const data = await FirebaseService.addStamp(customer.id);
+      const operationId =
+        stampOperationRef.current?.customerId === customer.id
+          ? stampOperationRef.current.id
+          : FirebaseService.createIdempotencyKey("stamp");
+      stampOperationRef.current = { customerId: customer.id, id: operationId };
+      const data = await FirebaseService.addStamp(customer.id, operationId);
 
       if (data.success && data.customer) {
+        stampOperationRef.current = null;
         setCustomer(data.customer);
         setLastResult({
           stamps: data.newStamps,
@@ -194,9 +204,15 @@ export default function CustomerDetailPage({
     setIsSubmitting(true);
 
     try {
-      const data = await FirebaseService.redeemReward(customer.id);
+      const operationId =
+        rewardOperationRef.current?.customerId === customer.id
+          ? rewardOperationRef.current.id
+          : FirebaseService.createIdempotencyKey("reward");
+      rewardOperationRef.current = { customerId: customer.id, id: operationId };
+      const data = await FirebaseService.redeemReward(customer.id, operationId);
 
       if (data.success && data.customer) {
+        rewardOperationRef.current = null;
         setCustomer(data.customer);
         setShowRedeemConfirmModal(false);
         setViewState("detail");
