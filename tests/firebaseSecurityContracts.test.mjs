@@ -89,9 +89,15 @@ test("customer query composites cover the count, prefix, and exact search constr
     index.queryScope === "COLLECTION" &&
     JSON.stringify(index.fields) === JSON.stringify(fieldPairs.map(([fieldPath, order]) => ({ fieldPath, order })))
   );
-  for (const field of ["name", "createdAt", "__name__", "uid", "code", "customerCode", "normalizedPhone", "phone", "phoneIndexId"]) {
+  for (const field of ["name", "createdAt", "uid", "code", "customerCode", "normalizedPhone", "phone", "phoneIndexId"]) {
     assert.equal(hasIndex([["clientId", "ASCENDING"], [field, "ASCENDING"]]), true, `${field} index`);
   }
+  // clientId + __name__ is an equality-only composite that duplicates what
+  // Firestore's automatic single-field index + document-id ordering already
+  // provides; the Firestore API rejects it as unnecessary, so it must never
+  // be declared explicitly (the documentId() exact-search query above still
+  // works without any composite index for this field).
+  assert.equal(hasIndex([["clientId", "ASCENDING"], ["__name__", "ASCENDING"]]), false, "unnecessary __name__ composite index");
   assert.match(service, /buildTodayCustomersCountQuery\(firestore, clientId, startOfToday\)/);
   assert.match(service, /index: "customers: clientId ASC, createdAt ASC"/);
   assert.deepEqual(indexes.fieldOverrides, []);
