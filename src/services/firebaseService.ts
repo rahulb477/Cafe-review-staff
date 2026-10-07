@@ -11,6 +11,7 @@ import {
   getCountFromServer,
   getDoc,
   getDocs,
+  documentId,
   limit,
   onSnapshot,
   orderBy,
@@ -19,13 +20,21 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  startAfter,
+  Timestamp,
   updateDoc,
   where,
   DocumentReference,
   DocumentSnapshot,
 } from "firebase/firestore";
 import { firebaseConfigError, getFirebaseAuth, getFirestoreDb } from "@/lib/firebase";
-import { avatarTintFor } from "@/lib/format";
+import {
+  avatarTintFor,
+  formatTimestamp,
+  formatTimestampTime,
+  timestampToIso,
+  timestampToMillis,
+} from "@/lib/format";
 import type { Firestore } from "firebase/firestore";
 import {
   buildClientConfig,
@@ -33,13 +42,13 @@ import {
   firstString,
   isStampLedgerEntry,
   nonNegativeInt,
+  nonNegativeIntOrUndefined,
   numberValue,
   isRewardRedeemable,
   nextStampBalance,
   remainingStampsAfterRedemption,
   resolveLoyaltyState,
   resolveStampTarget,
-  stampVisitAlreadyApplied,
   stringValue,
   validateStaffRecord,
   visitBaseline,
@@ -60,6 +69,12 @@ import {
 } from "./firestorePaths";
 import { parseCustomerQrPayload } from "./qrPayload";
 import {
+  formatCooldownRemaining,
+  getStampCooldownState,
+  reconcileLifetimeStamps,
+  STAMP_COOLDOWN_MS,
+} from "./stampPolicy";
+import {
   buildCustomerDirectoryQuery,
   buildCustomerExactSearchQueries,
   buildCustomerNamePrefixQuery,
@@ -73,6 +88,7 @@ import {
   isPermissionDeniedError,
   readErrorCode,
   staffError,
+  StampCooldownError,
   StaffServiceError,
   toStaffServiceError,
 } from "./staffErrors";
@@ -107,6 +123,11 @@ type StampTransactionOutcome = {
   customerId: string;
   customerName: string;
   replayed: boolean;
+};
+
+type HistoricalLoyaltyCounts = {
+  stampCount?: number;
+  redemptionCount?: number;
 };
 
 type RedemptionOutcome = {
@@ -563,10 +584,13 @@ export class FirebaseService {
    * ------------------------------------------------------------------ */
 
   /**
-   * Adds one stamp using an uncounted ledger reservation followed by an atomic
-   * visit-and-loyalty transaction. The stamp transaction document is the
-   * idempotency record: replaying the same transaction id returns the original
-   * result and can never increment totalVisits twice.
+   * Adds exactly one normal stamp in a single atomic Firestore transaction.
+   *
+   * Firestore Rules compare the stored lastStampAt with request.time, so the
+   * exact 12-hour eligibility check is performed by Firestore's server at
+   * commit time (not by the browser clock). The transaction also creates the
+   * immutable ledger/activity row, increments visits and loyalty, and writes
+   * notifications; any denied write leaves every document unchanged.
    */
   static async addStamp(
     customerId: string,
@@ -574,17 +598,20 @@ export class FirebaseService {
     notes?: string
   ): Promise<StampTransactionResult> {
     const session = await this.requireSession();
-    const clientId = session.clientId;
-    const clientConfig = session.clientRecord;
-
-    if (!clientConfig.loyaltyEnabled) {
-      throw staffError("LOYALTY_DISABLED", { path: `${COLLECTIONS.clients}/${clientId}.loyalty` });
+    const authenticatedUid = this.getRequiredAuth().currentUser?.uid;
+    if (!authenticatedUid || authenticatedUid !== session.uid) {
+      throw staffError("AUTH_REQUIRED", { detail: "Firebase Auth changed before the stamp transaction" });
     }
 
+    const clientId = session.clientId;
     const cleanCustomerId = assertSafeSegment(customerId, "customerId");
     const transactionId = this.createTransactionId("stamp", idempotencyTxId);
     const firestore = this.getRequiredDb();
 
+    const staffRef = doc(firestore, COLLECTIONS.staffUsers, authenticatedUid);
+    const clientRef = doc(firestore, COLLECTIONS.clients, clientId);
+    const customerRef = doc(firestore, COLLECTIONS.customers, cleanCustomerId);
+    const loyaltyRef = doc(firestore, COLLECTIONS.loyaltyAccounts, cleanCustomerId);
     const transactionRef = doc(
       firestore,
       COLLECTIONS.clients,
@@ -592,205 +619,315 @@ export class FirebaseService {
       SUBCOLLECTIONS.stampTransactions,
       transactionId
     );
-    const customerRef = doc(firestore, COLLECTIONS.customers, cleanCustomerId);
-    const loyaltyRef = doc(firestore, COLLECTIONS.loyaltyAccounts, cleanCustomerId);
+    const stampNotificationRef = doc(
+      firestore,
+      COLLECTIONS.clients,
+      clientId,
+      SUBCOLLECTIONS.notifications,
+      `${transactionId}_stamp`
+    );
+    const rewardNotificationRef = doc(
+      firestore,
+      COLLECTIONS.clients,
+      clientId,
+      SUBCOLLECTIONS.notifications,
+      `${transactionId}_reward_ready`
+    );
 
-    /* ------------------------------------------------------------------ *
-     * PHASE 1 — create the idempotency ledger row as UNCOUNTED.
-     *
-     * Phase 2 must update this existing row from false to true in the same
-     * atomic commit as the customer visit and loyalty changes. Keeping the row
-     * uncounted until then means a failed phase 2 never records a visit; a
-     * same-key retry can safely resume the operation.
-     * ------------------------------------------------------------------ */
-    const phaseOnePath = `${stampTransactionsPath(clientId)}/${transactionId}`;
-    const phaseOneTrace: FirestoreRequestTrace = {
+    // Historical ledgers are immutable. Their count is a lower bound used to
+    // repair lifetime counters; failure to read history never blocks a valid
+    // stamp, and the Firestore transaction still re-reads all mutable records.
+    const historicalCounts = await this.loadHistoricalLoyaltyCounts(
+      firestore,
+      clientId,
+      cleanCustomerId
+    );
+
+    const transactionPath = `${stampTransactionsPath(clientId)}/${transactionId}`;
+    const trace: FirestoreRequestTrace = {
       operation: "runTransaction",
-      path: phaseOnePath,
-      sessionUid: session.uid,
+      path: transactionPath,
+      sessionUid: authenticatedUid,
       clientId,
       constraints: [
+        `read staffUsers/${authenticatedUid}`,
+        `verify staffUsers/${authenticatedUid}.clientId == ${clientId}`,
+        `read clients/${clientId}`,
         `read customers/${cleanCustomerId}`,
         `read loyaltyAccounts/${cleanCustomerId}`,
-        "create uncounted stamp transaction",
+        "read idempotency ledger",
+        "atomically create stamp activity, visit count, loyalty balance, and notifications",
+        `Firestore Rules require request.time >= lastStampAt + ${STAMP_COOLDOWN_MS}ms`,
       ],
-      rule: "clients/{clientId}/stampTransactions/{transactionId} -> create requires isStaffOf(clientId), staffId == uid(), and same-business customer",
+      rule: "one transaction; Firestore Rules enforce lastStampAt + duration.value(12, 'h') <= request.time",
     };
-    this.traceFirestoreRequest(phaseOneTrace);
-    try {
-      await runTransaction(firestore, async (transaction) => {
-        const customerSnap = await transaction.get(customerRef);
-        const existingTxSnap = await transaction.get(transactionRef);
-        const loyaltySnap = await transaction.get(loyaltyRef);
+    this.traceFirestoreRequest(trace);
 
+    let outcome: StampTransactionOutcome;
+    try {
+      outcome = await runTransaction(firestore, async (transaction) => {
+        // Resolve the business again inside the transaction from the signed-in
+        // UID's canonical registry document. A stale URL/session cannot select
+        // another business or bypass a staff reassignment.
+        const staffSnap = await transaction.get(staffRef);
+        if (!staffSnap.exists()) {
+          throw staffError("STAFF_NOT_FOUND", { path: `staffUsers/${authenticatedUid}` });
+        }
+        const staffData = staffSnap.data();
+        const validation = validateStaffRecord(staffData);
+        if (!validation.ok) {
+          throw staffError(
+            validation.reason === "inactive" ? "STAFF_INACTIVE" : "STAFF_NO_CLIENT",
+            { path: `staffUsers/${authenticatedUid}` }
+          );
+        }
+        if (validation.clientId !== clientId) {
+          throw staffError("CROSS_BUSINESS", {
+            path: `staffUsers/${authenticatedUid}`,
+            detail: "the authenticated staff record no longer resolves to the active session business",
+          });
+        }
+
+        const clientSnap = await transaction.get(clientRef);
+        if (!clientSnap.exists()) {
+          throw staffError("CLIENT_NOT_FOUND", { path: `${COLLECTIONS.clients}/${clientId}` });
+        }
+        const clientConfig = buildClientConfig(clientId, clientSnap.data());
+        if (!clientConfig.loyaltyEnabled) {
+          throw staffError("LOYALTY_DISABLED", { path: `${COLLECTIONS.clients}/${clientId}.loyalty` });
+        }
+
+        const customerSnap = await transaction.get(customerRef);
         if (!customerSnap.exists()) {
           throw staffError("CUSTOMER_NOT_FOUND", { path: customerPath(cleanCustomerId) });
         }
         const customerData = customerSnap.data();
         this.assertClientOwnership(customerData.clientId, clientId, customerPath(cleanCustomerId));
 
+        const loyaltySnap = await transaction.get(loyaltyRef);
         const loyaltyData = loyaltySnap.exists() ? loyaltySnap.data() : undefined;
         if (loyaltyData) {
-          this.assertClientOwnership(loyaltyData.clientId, clientId, loyaltyAccountPath(cleanCustomerId));
+          this.assertClientOwnership(
+            loyaltyData.clientId,
+            clientId,
+            loyaltyAccountPath(cleanCustomerId)
+          );
           if (!resolveLoyaltyState(cleanCustomerId, clientId, loyaltyData).belongsToClient) {
             throw staffError("CROSS_BUSINESS", { path: loyaltyAccountPath(cleanCustomerId) });
           }
         }
 
+        const existingTxSnap = await transaction.get(transactionRef);
         if (existingTxSnap.exists()) {
-          // Idempotency key already used: never append the same operation twice.
-          // PHASE 2 completes (or replays) it.
           const existing = existingTxSnap.data();
-          const existingPath = `${stampTransactionsPath(clientId)}/${transactionId}`;
-          this.assertClientOwnership(existing.clientId, clientId, existingPath);
+          this.assertClientOwnership(existing.clientId, clientId, transactionPath);
           if (
             String(existing.customerId) !== cleanCustomerId ||
+            stringValue(existing.transactionId) !== transactionId ||
             stringValue(existing.type) !== "STAMP_ADDED" ||
-            stringValue(existing.staffId) !== session.uid ||
-            stringValue(existing.staffUid) !== session.uid
+            stringValue(existing.staffId) !== authenticatedUid ||
+            stringValue(existing.staffUid) !== authenticatedUid ||
+            existing.visitCounted === false
           ) {
             throw staffError("DUPLICATE_OPERATION", {
-              path: existingPath,
-              detail: "transaction id is not an unambiguous stamp by the authenticated staff uid for this customer",
+              path: transactionPath,
+              detail: "the idempotency key belongs to another or incomplete operation",
             });
           }
-          return;
+
+          return {
+            previousStamps: nonNegativeInt(existing.stampCountBefore),
+            newStamps: nonNegativeInt(existing.stampCountAfter),
+            stampTarget: resolveStampTarget(existing.stampTarget, clientConfig.stampTarget),
+            rewardUnlocked: existing.rewardUnlocked === true,
+            rewardName: firstString(existing.rewardName, clientConfig.rewardName) as string,
+            customerId: cleanCustomerId,
+            customerName:
+              firstString(existing.customerName, customerData.name, customerData.displayName) || "Customer",
+            replayed: true,
+          } satisfies StampTransactionOutcome;
         }
 
         const previousStamps = loyaltyData
           ? resolveLoyaltyState(cleanCustomerId, clientId, loyaltyData).stamps
           : 0;
-        const stampTarget = resolveStampTarget(loyaltyData?.stampTarget, clientConfig.stampTarget);
-        const rewardName = firstString(loyaltyData?.rewardName, clientConfig.rewardName) as string;
+        const stampTarget = clientConfig.stampTarget;
+        const rewardName = clientConfig.rewardName;
         const newStamps = nextStampBalance(previousStamps);
-        const customerName = firstString(customerData.name) || "Customer";
-        const customerCode =
-          firstString(customerData.code, customerData.customerCode) || cleanCustomerId.substring(0, 6);
+        const rewardUnlocked = newStamps >= stampTarget;
+        const customerName = firstString(customerData.name, customerData.displayName) || "Customer";
+        const customerCode = firstString(
+          customerData.customerCode,
+          customerData.code,
+          customerData.displayId
+        );
+        const staffName = buildStaffUser(authenticatedUid, staffData, {
+          displayName: session.firebaseUser.displayName,
+          email: session.firebaseUser.email,
+        }).name;
 
+        const rewardsRedeemed = Math.max(
+          nonNegativeInt(loyaltyData?.rewardsRedeemed),
+          nonNegativeInt(loyaltyData?.totalRewardsRedeemed),
+          historicalCounts.redemptionCount ?? 0
+        );
+        const previousRewardsEarned = Math.max(
+          nonNegativeInt(loyaltyData?.rewardsEarned),
+          nonNegativeInt(loyaltyData?.totalRewardsEarned),
+          rewardsRedeemed
+        );
+        // Repair a missing earned counter for an already-ready legacy account,
+        // but only count the reward once until the current balance is redeemed.
+        const rewardJustUnlocked =
+          (previousStamps < stampTarget && rewardUnlocked) ||
+          (previousStamps >= stampTarget && previousRewardsEarned === rewardsRedeemed);
+        const rewardsEarned = previousRewardsEarned + (rewardJustUnlocked ? 1 : 0);
+        const lifetimeStamps =
+          reconcileLifetimeStamps(
+            previousStamps,
+            loyaltyData?.lifetimeStamps,
+            historicalCounts.stampCount
+          ) + 1;
+        const nextVisits = visitBaseline(customerData.totalVisits) + 1;
+
+        // One successful stamp has one immutable history/activity record.
         transaction.set(transactionRef, {
           clientId,
           customerId: cleanCustomerId,
           transactionId,
-          staffId: session.uid,
-          staffUid: session.uid,
-          staffName: session.staffRecord.name,
+          staffId: authenticatedUid,
+          staffUid: authenticatedUid,
+          staffName,
           actorType: "STAFF",
-          actorName: session.staffRecord.name,
+          actorName: staffName,
           type: "STAMP_ADDED",
           title: "Stamp Added",
-          description: `${customerName} #${customerCode}`,
+          description: customerCode ? `${customerName} #${customerCode}` : customerName,
           reason: notes?.trim() || "Visit stamp (counter)",
           delta: 1,
           addedCount: 1,
           customerName,
-          customerCode,
-          // PHASE 2 marks this counted inside the atomic customer update — the
-          // canonical rules require the reference to already exist and to become
-          // counted by the same commit.
-          visitCounted: false,
+          customerCode: customerCode ?? null,
+          visitCounted: true,
+          visitCountedAt: serverTimestamp(),
           stampCountBefore: previousStamps,
           stampCountAfter: newStamps,
           stampTarget,
           rewardName,
-          rewardUnlocked: newStamps >= stampTarget,
+          rewardUnlocked,
           notes: notes?.trim() || "Standard loyalty stamp",
           createdAt: serverTimestamp(),
         });
+
+        transaction.update(customerRef, {
+          totalVisits: nextVisits,
+          lastVisitAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          lastVisitTransactionId: transactionId,
+        });
+
+        transaction.set(
+          loyaltyRef,
+          {
+            clientId,
+            customerId: cleanCustomerId,
+            currentStamps: newStamps,
+            // Keep the existing alias for the Customer app/reward architecture.
+            stamps: newStamps,
+            lifetimeStamps,
+            rewardsEarned,
+            rewardsRedeemed,
+            totalRewardsEarned: rewardsEarned,
+            totalRewardsRedeemed: rewardsRedeemed,
+            stampTarget,
+            rewardName,
+            isEligibleForReward: rewardUnlocked,
+            lastStampAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        const notificationMetadata = {
+          transactionId,
+          stamps: newStamps,
+          stampTarget,
+          staffUid: authenticatedUid,
+          staffName,
+          createdBy: "STAFF_APP",
+        };
+        transaction.set(stampNotificationRef, {
+          clientId,
+          type: "STAMP_ADDED",
+          title: "Stamp added",
+          message: `${customerName} received 1 stamp (${newStamps}/${stampTarget}).`,
+          customerId: cleanCustomerId,
+          read: false,
+          staffUid: authenticatedUid,
+          metadata: notificationMetadata,
+          createdAt: serverTimestamp(),
+        });
+
+        if (rewardJustUnlocked) {
+          transaction.set(rewardNotificationRef, {
+            clientId,
+            type: "REWARD_READY",
+            title: "Reward ready",
+            message: `${customerName} is ready for ${rewardName}.`,
+            customerId: cleanCustomerId,
+            read: false,
+            staffUid: authenticatedUid,
+            metadata: {
+              ...notificationMetadata,
+              stamps: newStamps,
+              rewardName,
+            },
+            createdAt: serverTimestamp(),
+          });
+        }
+
+        return {
+          previousStamps,
+          newStamps,
+          stampTarget,
+          rewardUnlocked,
+          rewardName,
+          customerId: cleanCustomerId,
+          customerName,
+          replayed: false,
+        } satisfies StampTransactionOutcome;
       });
     } catch (error: unknown) {
-      this.traceFirestoreRequest(phaseOneTrace, error);
+      this.traceFirestoreRequest(trace, error);
+      if (isPermissionDeniedError(error)) {
+        const cooldownError = await this.stampCooldownErrorAfterDeniedWrite(
+          loyaltyRef,
+          clientId,
+          error
+        );
+        if (cooldownError) throw cooldownError;
+      }
       throw toStaffServiceError(error, "UNKNOWN", {
-        path: phaseOnePath,
-        detail: "append uncounted stamp transaction",
+        path: transactionPath,
+        detail: "atomic stamp, visit, loyalty and notification transaction",
       });
-    }
-
-    /* ------------------------------------------------------------------ *
-     * PHASE 2 — count the visit and move the loyalty balance atomically.
-     *
-     * The canonical path marks the ledger row counted in the same commit
-     * (`getAfter(...).visitCounted == true`). If that rule is not deployed,
-     * fail visibly and keep the uncounted phase-one row for a same-key retry;
-     * never bypass the security invariant with an alternate write.
-     * ------------------------------------------------------------------ */
-    const visitArgs = {
-      firestore,
-      clientId,
-      clientConfig,
-      session,
-      customerId: cleanCustomerId,
-      transactionId,
-      transactionRef,
-      customerRef,
-      loyaltyRef,
-    };
-
-    let outcome: StampTransactionOutcome;
-    try {
-      outcome = await this.applyStampVisit(visitArgs);
-    } catch (error: unknown) {
-      const path = `${stampTransactionsPath(clientId)}/${transactionId}`;
-      this.traceFirestoreRequest({
-        operation: "runTransaction",
-        path,
-        sessionUid: session.uid,
-        clientId,
-        constraints: [
-          "mark existing visitCounted=false transaction true",
-          "customer.totalVisits += 1",
-          "customer.lastVisitAt = request time",
-          "customer.lastVisitTransactionId = transactionId",
-          "loyaltyAccount.stamps += 1",
-        ],
-        rule: "customer visit update requires get(tx).visitCounted != true and getAfter(tx).visitCounted == true",
-      }, error);
-      throw toStaffServiceError(error, "UNKNOWN", { path, detail: "apply counted stamp visit" });
     }
 
     const updatedCustomer = await this.loadCustomerById(
       cleanCustomerId,
       clientId,
-      clientConfig,
-      { quiet: true }
+      session.clientRecord,
+      {
+        quiet: true,
+        historicalCounts:
+          historicalCounts.stampCount === undefined
+            ? historicalCounts
+            : {
+                ...historicalCounts,
+                stampCount: historicalCounts.stampCount + (outcome.replayed ? 0 : 1),
+              },
+      }
     );
-
-    if (!outcome.replayed) {
-      await this.emitNotifications(clientId, session, [
-        {
-          id: `${transactionId}_stamp`,
-          type: "STAMP_ADDED",
-          title: "Stamp added",
-          message: `${outcome.customerName} received 1 stamp (${outcome.newStamps}/${outcome.stampTarget}).`,
-          customerId: cleanCustomerId,
-          metadata: {
-            transactionId,
-            stamps: outcome.newStamps,
-            stampTarget: outcome.stampTarget,
-            staffUid: session.uid,
-            staffName: session.staffRecord.name,
-          },
-        },
-      ]);
-    }
-
-    if (!outcome.replayed && outcome.rewardUnlocked) {
-      await this.emitNotifications(clientId, session, [
-        {
-          id: `${transactionId}_reward_ready`,
-          type: "REWARD_READY",
-          title: "Reward ready",
-          message: `${outcome.customerName} is ready for ${outcome.rewardName}.`,
-          customerId: cleanCustomerId,
-          metadata: {
-            transactionId,
-            stamps: outcome.newStamps,
-            stampTarget: outcome.stampTarget,
-            rewardName: outcome.rewardName,
-            staffUid: session.uid,
-          },
-        },
-      ]);
-    }
 
     return {
       success: true,
@@ -807,156 +944,68 @@ export class FirebaseService {
   }
 
   /**
-   * PHASE 2 of a stamp: counts the visit, marks the ledger row counted and
-   * updates the loyalty balance in ONE transaction.
-   *
-   * Every write matches what the Security Rules whitelist:
-   *   - `stampTransactions`: only `visitCounted` / `visitCountedAt`, once;
-   *   - `customers`: only `totalVisits` (+1, mirroring the rules' baseline),
-   *     `lastVisitAt`, `updatedAt`, `lastVisitTransactionId`;
-   *   - `loyaltyAccounts`: `clientId`/`customerId` unchanged, `stamps` int >= 0.
+   * Maps a server rule denial to a friendly cooldown response when the latest
+   * canonical loyalty timestamp shows the cooldown is still pending. The local
+   * clock is used only to estimate the message; the actual allow/deny decision
+   * has already been made with Firestore Rules request.time.
    */
-  private static async applyStampVisit(
-    args: {
-      firestore: Firestore;
-      clientId: string;
-      clientConfig: ClientConfig;
-      session: StaffSession;
-      customerId: string;
-      transactionId: string;
-      transactionRef: DocumentReference;
-      customerRef: DocumentReference;
-      loyaltyRef: DocumentReference;
-    }
-  ): Promise<StampTransactionOutcome> {
-    const { firestore, clientId, clientConfig, customerId, transactionId } = args;
-    const ledgerPath = `${stampTransactionsPath(clientId)}/${transactionId}`;
-
-    return runTransaction(firestore, async (transaction) => {
-      const transactionSnap = await transaction.get(args.transactionRef);
-      if (!transactionSnap.exists()) {
-        throw staffError("DUPLICATE_OPERATION", {
-          path: ledgerPath,
-          detail: "stamp transaction disappeared before the visit was counted",
-        });
-      }
-      const ledgerData = transactionSnap.data();
-      this.assertClientOwnership(ledgerData.clientId, clientId, ledgerPath);
-      if (
-        String(ledgerData.customerId) !== customerId ||
-        stringValue(ledgerData.type) !== "STAMP_ADDED" ||
-        stringValue(ledgerData.staffId) !== args.session.uid ||
-        stringValue(ledgerData.staffUid) !== args.session.uid
-      ) {
-        throw staffError("DUPLICATE_OPERATION", {
-          path: ledgerPath,
-          detail: "stamp transaction does not match this customer and authenticated staff uid",
-        });
-      }
-
-      const customerSnap = await transaction.get(args.customerRef);
-      if (!customerSnap.exists()) {
-        throw staffError("CUSTOMER_NOT_FOUND", { path: customerPath(customerId) });
-      }
-      const customerData = customerSnap.data();
-      this.assertClientOwnership(customerData.clientId, clientId, customerPath(customerId));
-
-      const loyaltySnap = await transaction.get(args.loyaltyRef);
+  private static async stampCooldownErrorAfterDeniedWrite(
+    loyaltyRef: DocumentReference,
+    clientId: string,
+    cause: unknown
+  ): Promise<StampCooldownError | null> {
+    try {
+      const loyaltySnap = await getDoc(loyaltyRef);
       const loyaltyData = loyaltySnap.exists() ? loyaltySnap.data() : undefined;
-      if (loyaltyData) {
-        this.assertClientOwnership(loyaltyData.clientId, clientId, loyaltyAccountPath(customerId));
-      }
+      if (loyaltyData && stringValue(loyaltyData.clientId) !== clientId) return null;
 
-      const stampTarget = resolveStampTarget(
-        ledgerData.stampTarget,
-        loyaltyData?.stampTarget,
-        clientConfig.stampTarget
-      );
-      const rewardName = firstString(
-        loyaltyData?.rewardName,
-        ledgerData.rewardName,
-        clientConfig.rewardName
-      ) as string;
-      const customerName = firstString(customerData.name, ledgerData.customerName) || "Customer";
+      const firestore = this.getRequiredDb();
+      const customerSnap = await getDoc(doc(firestore, COLLECTIONS.customers, loyaltyRef.id));
+      const customerData = customerSnap.exists() ? customerSnap.data() : undefined;
+      if (customerData && stringValue(customerData.clientId) !== clientId) return null;
 
-      // Keep the customer marker as a defensive replay check in addition to
-      // the transaction's visitCounted flag. A successful commit updates both.
-      const alreadyApplied = stampVisitAlreadyApplied(
-        ledgerData,
-        customerData,
-        transactionId
-      );
+      const candidates = [
+        { value: loyaltyData?.lastStampAt, source: loyaltyAccountPath(loyaltyRef.id) },
+        { value: customerData?.lastVisitAt, source: customerPath(loyaltyRef.id) },
+      ]
+        .map((candidate) => ({ ...candidate, millis: timestampToMillis(candidate.value) }))
+        .filter(
+          (candidate): candidate is { value: unknown; source: string; millis: number } =>
+            candidate.millis !== undefined
+        )
+        .sort((a, b) => b.millis - a.millis);
+      const lastStampAt = candidates[0]?.value;
+      const lastStampAtMillis = candidates[0]?.millis;
+      const lastStampPath = candidates[0]?.source || loyaltyAccountPath(loyaltyRef.id);
+      if (lastStampAtMillis === undefined) return null;
+      const cooldown = getStampCooldownState(lastStampAtMillis, Date.now());
+      if (cooldown.nextStampAtMillis === undefined) return null;
 
-      if (alreadyApplied) {
-        // Already applied by an earlier attempt — replay, never re-count.
-        const appliedStamps = nonNegativeInt(ledgerData.stampCountAfter);
-        return {
-          previousStamps: nonNegativeInt(ledgerData.stampCountBefore),
-          newStamps: appliedStamps,
-          stampTarget,
-          rewardUnlocked: ledgerData.rewardUnlocked === true || appliedStamps >= stampTarget,
-          rewardName,
-          customerId,
-          customerName,
-          replayed: true,
-        } satisfies StampTransactionOutcome;
-      }
-
-      // The balance is always computed from the value read NOW, so two staff
-      // members stamping at the same moment never lose a stamp.
-      const previousStamps = loyaltyData
-        ? resolveLoyaltyState(customerId, clientId, loyaltyData).stamps
-        : 0;
-      const newStamps = nextStampBalance(previousStamps);
-      const rewardUnlocked = newStamps >= stampTarget;
-
-      transaction.set(
-        args.transactionRef,
-        {
-          visitCounted: true,
-          visitCountedAt: serverTimestamp(),
-          stampCountBefore: previousStamps,
-          stampCountAfter: newStamps,
-          stampTarget,
-          rewardName,
-          rewardUnlocked,
+      // This remaining-time value is display-only. If the local clock says the
+      // window elapsed but Firestore denied the commit, surface the structured
+      // server rejection without pretending the browser clock can overrule it.
+      const nextStampAt = Timestamp.fromMillis(cooldown.nextStampAtMillis);
+      const message =
+        cooldown.remainingMs > 0
+          ? `Stamp already added recently. Next stamp available in ${formatCooldownRemaining(cooldown.remainingMs)}.`
+          : "Firestore rejected the 12-hour stamp cooldown check. Refresh and try again.";
+      return new StampCooldownError({
+        lastStampAt,
+        nextStampAt,
+        remainingMs: cooldown.remainingMs,
+        message,
+        technical: {
+          code: readErrorCode(cause) || "permission-denied",
+          path: lastStampPath,
+          detail: "Firestore Rules rejected the write during the 12-hour request.time cooldown",
         },
-        { merge: true }
-      );
-
-      transaction.update(args.customerRef, {
-        totalVisits: visitBaseline(customerData.totalVisits) + 1,
-        lastVisitAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-        lastVisitTransactionId: transactionId,
       });
-
-      transaction.set(
-        args.loyaltyRef,
-        {
-          clientId,
-          customerId,
-          stamps: newStamps,
-          stampTarget,
-          rewardName,
-          isEligibleForReward: rewardUnlocked,
-          lastStampAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      return {
-        previousStamps,
-        newStamps,
-        stampTarget,
-        rewardUnlocked,
-        rewardName,
-        customerId,
-        customerName,
-        replayed: false,
-      } satisfies StampTransactionOutcome;
-    });
+    } catch (error: unknown) {
+      if (error instanceof StampCooldownError) return error;
+      // This is intentionally best-effort. Never replace the original safe
+      // permission/network mapping with a secondary lookup failure.
+      return null;
+    }
   }
 
   /**
@@ -978,6 +1027,11 @@ export class FirebaseService {
     const cleanCustomerId = assertSafeSegment(customerId, "customerId");
     const redemptionId = this.createTransactionId("reward", idempotencyTxId);
     const firestore = this.getRequiredDb();
+    const historicalCounts = await this.loadHistoricalLoyaltyCounts(
+      firestore,
+      clientId,
+      cleanCustomerId
+    );
 
     const redemptionRef = doc(
       firestore,
@@ -1028,9 +1082,12 @@ export class FirebaseService {
           clientId,
           customerPath(cleanCustomerId)
         );
-        const customerName = firstString(customerData.name) || "Customer";
-        const customerCode =
-          firstString(customerData.code, customerData.customerCode) || cleanCustomerId.substring(0, 6);
+        const customerName = firstString(customerData.name, customerData.displayName) || "Customer";
+        const customerCode = firstString(
+          customerData.customerCode,
+          customerData.code,
+          customerData.displayId
+        );
 
         if (redemptionSnap.exists()) {
           const existing = redemptionSnap.data();
@@ -1081,8 +1138,8 @@ export class FirebaseService {
           });
         }
 
-        const stampTarget = resolveStampTarget(loyaltyData.stampTarget, clientConfig.stampTarget);
-        const rewardName = firstString(loyaltyData.rewardName, clientConfig.rewardName) as string;
+        const stampTarget = clientConfig.stampTarget;
+        const rewardName = clientConfig.rewardName;
         const currentStamps = loyaltyState.stamps;
 
         if (!isRewardRedeemable(currentStamps, stampTarget)) {
@@ -1092,13 +1149,28 @@ export class FirebaseService {
         }
 
         const remainingStamps = remainingStampsAfterRedemption(currentStamps, stampTarget);
-        const previousRewards = nonNegativeInt(loyaltyData.totalRewardsRedeemed);
+        const previousRewards = Math.max(
+          nonNegativeInt(loyaltyData.rewardsRedeemed),
+          nonNegativeInt(loyaltyData.totalRewardsRedeemed),
+          historicalCounts.redemptionCount ?? 0
+        );
+        const rewardsRedeemed = previousRewards + 1;
+        const rewardsEarned = Math.max(
+          nonNegativeInt(loyaltyData.rewardsEarned),
+          nonNegativeInt(loyaltyData.totalRewardsEarned),
+          rewardsRedeemed
+        );
+        const lifetimeStamps = reconcileLifetimeStamps(
+          currentStamps,
+          loyaltyData.lifetimeStamps,
+          historicalCounts.stampCount
+        );
 
         transaction.set(redemptionRef, {
           clientId,
           customerId: cleanCustomerId,
           customerName,
-          customerCode,
+          customerCode: customerCode ?? null,
           rewardName,
           stampCost: stampTarget,
           stampsResetFrom: currentStamps,
@@ -1124,11 +1196,14 @@ export class FirebaseService {
           actorName: session.staffRecord.name,
           type: "REWARD_REDEEMED",
           title: "Reward Redeemed",
-          description: `${rewardName} • ${customerName} #${customerCode}`,
+          rewardName,
+          description: customerCode
+            ? `${rewardName} • ${customerName} #${customerCode}`
+            : `${rewardName} • ${customerName}`,
           reason: `${rewardName} redeemed`,
           delta: -stampTarget,
           customerName,
-          customerCode,
+          customerCode: customerCode ?? null,
           badgeText: "Gift",
           badgeType: "reward",
           visitCounted: false,
@@ -1140,9 +1215,15 @@ export class FirebaseService {
           {
             clientId,
             customerId: cleanCustomerId,
+            currentStamps: remainingStamps,
+            // Preserve the legacy balance alias used by existing Customer app readers.
             stamps: remainingStamps,
+            lifetimeStamps,
+            rewardsEarned,
+            rewardsRedeemed,
+            totalRewardsEarned: rewardsEarned,
+            totalRewardsRedeemed: rewardsRedeemed,
             isEligibleForReward: remainingStamps >= stampTarget,
-            totalRewardsRedeemed: previousRewards + 1,
             lastRewardRedemptionId: redemptionId,
             lastRewardRedeemedAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
@@ -1171,7 +1252,7 @@ export class FirebaseService {
       cleanCustomerId,
       clientId,
       clientConfig,
-      { quiet: true }
+      { quiet: true, historicalCounts }
     );
 
     if (!outcome.replayed) {
@@ -1715,11 +1796,131 @@ export class FirebaseService {
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  /**
+   * Reconciles lifetime counters from immutable per-business ledgers. These
+   * counts are a conservative lower bound and never replace a larger stored
+   * lifetime value.
+   */
+  private static async loadHistoricalLoyaltyCounts(
+    firestore: Firestore,
+    clientId: string,
+    customerId: string
+  ): Promise<HistoricalLoyaltyCounts> {
+    const [stampCount, redemptionCount] = await Promise.all([
+      this.countValidHistoryRows(
+        firestore,
+        clientId,
+        customerId,
+        SUBCOLLECTIONS.stampTransactions,
+        (id, data) => this.isValidHistoricalStamp(id, data, clientId, customerId)
+      ),
+      this.countValidHistoryRows(
+        firestore,
+        clientId,
+        customerId,
+        SUBCOLLECTIONS.rewardRedemptions,
+        (id, data) => this.isValidHistoricalRedemption(id, data, clientId, customerId)
+      ),
+    ]);
+    return { stampCount, redemptionCount };
+  }
+
+  private static async countValidHistoryRows(
+    firestore: Firestore,
+    clientId: string,
+    customerId: string,
+    subcollection: string,
+    isValid: (id: string, data: UnknownRecord) => boolean
+  ): Promise<number | undefined> {
+    const path = `${COLLECTIONS.clients}/${clientId}/${subcollection}`;
+    const trace: FirestoreRequestTrace = {
+      operation: "getDocs",
+      path,
+      clientId,
+      constraints: [`customerId == ${customerId}`],
+      orderBy: "__name__ asc",
+      limit: 500,
+      rule: `clients/{clientId}/${subcollection}/{id} -> isStaffOf(clientId)`,
+    };
+    const source = collection(firestore, COLLECTIONS.clients, clientId, subcollection);
+    let cursor: QueryDocumentSnapshot | undefined;
+    let count = 0;
+
+    try {
+      while (true) {
+        const historyQuery = cursor
+          ? query(
+              source,
+              where("customerId", "==", customerId),
+              orderBy(documentId()),
+              startAfter(cursor),
+              limit(500)
+            )
+          : query(
+              source,
+              where("customerId", "==", customerId),
+              orderBy(documentId()),
+              limit(500)
+            );
+        this.traceFirestoreRequest(trace);
+        const snapshot = await getDocs(historyQuery);
+        for (const historyDoc of snapshot.docs) {
+          if (isValid(historyDoc.id, historyDoc.data())) count += 1;
+        }
+        if (snapshot.size < 500) break;
+        cursor = snapshot.docs[snapshot.docs.length - 1];
+      }
+      return count;
+    } catch (error: unknown) {
+      this.traceFirestoreRequest(trace, error);
+      // Lifetime repair is best-effort; the transaction preserves stored and
+      // current counts if the immutable history is unavailable.
+      return undefined;
+    }
+  }
+
+  private static isValidHistoricalStamp(
+    id: string,
+    data: UnknownRecord,
+    clientId: string,
+    customerId: string
+  ): boolean {
+    if (stringValue(data.clientId) !== clientId || stringValue(data.customerId) !== customerId) {
+      return false;
+    }
+    const type = stringValue(data.type);
+    if (type && type !== "STAMP_ADDED") return false;
+    if (!type && numberValue(data.delta) !== 1) return false;
+    if (data.delta !== undefined && numberValue(data.delta) !== 1) return false;
+    if (data.addedCount !== undefined && nonNegativeIntOrUndefined(data.addedCount) !== 1) return false;
+    if (data.visitCounted !== undefined && data.visitCounted !== true) return false;
+    if (data.transactionId !== undefined && stringValue(data.transactionId) !== id) return false;
+    return timestampToMillis(data.createdAt) !== undefined;
+  }
+
+  private static isValidHistoricalRedemption(
+    id: string,
+    data: UnknownRecord,
+    clientId: string,
+    customerId: string
+  ): boolean {
+    if (stringValue(data.clientId) !== clientId || stringValue(data.customerId) !== customerId) {
+      return false;
+    }
+    if (data.transactionId !== undefined && stringValue(data.transactionId) !== id) return false;
+    const stampCost = nonNegativeIntOrUndefined(data.stampCost);
+    if (stampCost === undefined || stampCost < 1) return false;
+    return (
+      timestampToMillis(data.redeemedAt) !== undefined ||
+      timestampToMillis(data.createdAt) !== undefined
+    );
+  }
+
   private static async loadCustomerById(
     customerIdOrCode: string,
     clientId: string,
     clientConfig: ClientConfig,
-    options: { quiet?: boolean } = {}
+    options: { quiet?: boolean; historicalCounts?: HistoricalLoyaltyCounts } = {}
   ): Promise<CustomerProfile> {
     const cleanId = customerIdOrCode.trim();
     if (!cleanId) throw staffError("CUSTOMER_NOT_FOUND", { detail: "empty customer id" });
@@ -1792,12 +1993,16 @@ export class FirebaseService {
     }
 
     const loyaltyData = await this.readLoyaltyForCustomer(customerDocId, clientId);
+    const historicalCounts =
+      options.historicalCounts ??
+      (await this.loadHistoricalLoyaltyCounts(firestore, clientId, customerDocId));
     const profile = this.toCustomerProfile(
       customerDocId,
       customerData,
       loyaltyData,
       clientConfig,
-      clientId
+      clientId,
+      historicalCounts
     );
     if (!profile) {
       throw staffError("CUSTOMER_NOT_FOUND", { path: customerPath(customerDocId) });
@@ -1838,7 +2043,8 @@ export class FirebaseService {
     customerData: UnknownRecord,
     loyaltyData: UnknownRecord | undefined,
     clientConfig: ClientConfig,
-    clientId: string
+    clientId: string,
+    historicalCounts: HistoricalLoyaltyCounts = {}
   ): CustomerProfile | null {
     try {
       const docClientId = stringValue(customerData.clientId);
@@ -1852,65 +2058,79 @@ export class FirebaseService {
       const name = firstString(customerData.name, customerData.displayName) || "Customer";
       const loyaltyState = resolveLoyaltyState(customerDocId, clientId, loyaltyData);
       const stamps = loyaltyState.belongsToClient ? loyaltyState.stamps : 0;
-      const stampTarget = resolveStampTarget(
-        loyaltyState.stampTarget,
-        clientConfig.stampTarget
+      const stampTarget = clientConfig.stampTarget;
+      const customerCode = firstString(
+        customerData.customerCode,
+        customerData.code,
+        customerData.displayId
       );
-      const customerCode =
-        firstString(customerData.code, customerData.customerCode) ||
-        customerDocId.substring(0, 6).toUpperCase();
+      const displayId = firstString(customerData.displayId, customerCode);
+      const lastStampAtMillis = timestampToMillis(loyaltyState.lastStampAt);
+      const lastVisitAtMillis = timestampToMillis(customerData.lastVisitAt);
+      const storedTotalVisits = nonNegativeIntOrUndefined(customerData.totalVisits);
+      const totalVisits =
+        storedTotalVisits !== undefined || historicalCounts.stampCount !== undefined
+          ? Math.max(storedTotalVisits ?? 0, historicalCounts.stampCount ?? 0)
+          : undefined;
+      const storedLifetimeStamps = loyaltyState.lifetimeStamps;
+      const lifetimeStamps =
+        storedLifetimeStamps !== undefined ||
+        historicalCounts.stampCount !== undefined ||
+        stamps > 0
+          ? reconcileLifetimeStamps(stamps, storedLifetimeStamps, historicalCounts.stampCount)
+          : undefined;
+      const storedRewardsRedeemed = loyaltyState.rewardsRedeemed;
+      const rewardsRedeemed =
+        storedRewardsRedeemed !== undefined || historicalCounts.redemptionCount !== undefined
+          ? Math.max(storedRewardsRedeemed ?? 0, historicalCounts.redemptionCount ?? 0)
+          : undefined;
+      const storedRewardsEarned = loyaltyState.rewardsEarned;
+      const rewardsEarned =
+        storedRewardsEarned !== undefined || rewardsRedeemed !== undefined
+          ? Math.max(storedRewardsEarned ?? 0, rewardsRedeemed ?? 0)
+          : undefined;
 
       // Warm café tints, shared with the design system so a customer avatar
       // looks identical in the lookup list, the detail card and the sheets.
       const avatarBg = avatarTintFor(customerDocId);
 
-      // Newest real timestamp on the record, used only for relative
-      // "2 mins ago" copy in the lookup list. Missing data stays missing.
-      const lastStampAtMillis = this.timestampToMillis(loyaltyState.lastStampAt);
-      const lastVisitAtMillis = this.timestampToMillis(customerData.lastVisitAt);
-      const updatedAtMillis = this.timestampToMillis(customerData.updatedAt);
-      const createdAtMillis = this.timestampToMillis(customerData.createdAt);
-      const lastActivityMillis = [
-        lastStampAtMillis,
-        lastVisitAtMillis,
-        updatedAtMillis,
-        createdAtMillis,
-      ].reduce<number | undefined>(
-        (newest, candidate) =>
-          candidate === undefined ? newest : newest === undefined ? candidate : Math.max(newest, candidate),
-        undefined
-      );
-
       return {
         id: customerDocId,
-        uid: firstString(customerData.uid) || customerDocId,
+        customerId: customerDocId,
+        uid: firstString(customerData.uid, customerData.authUid, customerData.userId),
         clientId,
         clientSlug: clientConfig.slug,
         customerCode,
+        displayId,
         name,
         email: firstString(customerData.email),
         phone: firstString(customerData.phone),
         normalizedPhone: firstString(customerData.normalizedPhone),
         phoneIndexId: firstString(customerData.phoneIndexId),
         tableNumber: firstString(customerData.tableNumber),
-        visitingSince: this.formatFirestoreTimestamp(
-          customerData.visitingSince ?? customerData.createdAt
-        ),
-        totalVisits: nonNegativeInt(customerData.totalVisits),
-        lastVisitAt: this.formatFirestoreTimestamp(customerData.lastVisitAt),
+        visitingSince: formatTimestamp(customerData.visitingSince ?? customerData.createdAt),
+        totalVisits,
+        lastVisitAt: formatTimestamp(customerData.lastVisitAt),
+        lastVisitAtMillis,
         lastVisitTransactionId: firstString(customerData.lastVisitTransactionId),
-        qrToken: firstString(customerData.qrToken) || customerDocId,
+        qrToken: firstString(customerData.qrToken),
         status: firstString(customerData.status) || "active",
         avatarInitial: name.charAt(0).toUpperCase() || "C",
         avatarBg,
         stamps,
         stampTarget,
-        rewardName: firstString(loyaltyState.rewardName, clientConfig.rewardName) as string,
+        rewardName: clientConfig.rewardName,
         isEligibleForReward: stamps >= stampTarget,
-        lastStampAt: this.formatFirestoreTimestamp(loyaltyState.lastStampAt),
-        updatedAt: this.formatFirestoreTimestamp(customerData.updatedAt),
-        createdAt: this.formatFirestoreTimestamp(customerData.createdAt),
-        lastActivityMillis,
+        lifetimeStamps,
+        rewardsEarned,
+        rewardsRedeemed,
+        lastStampAt: formatTimestamp(loyaltyState.lastStampAt),
+        lastStampAtMillis,
+        updatedAt: formatTimestamp(customerData.updatedAt),
+        createdAt: formatTimestamp(customerData.createdAt),
+        // The customer list's relative-time line is specifically the last visit,
+        // never an unrelated profile edit or customer registration timestamp.
+        lastActivityMillis: lastVisitAtMillis,
       };
     } catch (error: unknown) {
       if (error instanceof StaffServiceError) throw error;
@@ -1924,11 +2144,7 @@ export class FirebaseService {
 
   private static isRewardActivity(data: UnknownRecord): boolean {
     const type = stringValue(data.type);
-    if (type === "REWARD_REDEEMED") return true;
-    if (type === "STAMP_ADDED") return false;
-    const delta = numberValue(data.delta);
-    if (delta !== undefined) return delta < 0;
-    return false;
+    return type === "REWARD_REDEEMED" || type === "REWARD";
   }
 
   private static toActivityItem(
@@ -1941,13 +2157,11 @@ export class FirebaseService {
       return null;
     }
 
-    if (data.type === "STAMP_ADDED" && data.visitCounted === false) return null;
-
     const isReward = this.isRewardActivity(data);
+    if (!isReward && !isStampLedgerEntry(data)) return null;
     const customerId = firstString(data.customerId);
-    const customerCode =
-      firstString(data.customerCode, data.customerId)?.substring(0, 6).toUpperCase() ?? "";
-    const staffName = firstString(data.staffName, data.actorName, data.actorUid);
+    const customerCode = firstString(data.customerCode, data.code, data.displayId);
+    const staffName = firstString(data.staffName, data.actorName);
 
     return {
       id,
@@ -1966,8 +2180,8 @@ export class FirebaseService {
           : `Stamp added${customerCode ? ` • #${customerCode}` : ""}`),
       badgeText: isReward ? "Gift" : "+1",
       badgeType: isReward ? "reward" : "stamp",
-      timeFormatted: this.formatTimeOnly(data.createdAt),
-      timestamp: this.isoTimestamp(data.createdAt) || new Date().toISOString(),
+      timeFormatted: formatTimestampTime(data.createdAt),
+      timestamp: timestampToIso(data.createdAt) || "",
       transactionId: firstString(data.transactionId) || id,
     };
   }
@@ -1978,7 +2192,7 @@ export class FirebaseService {
   ): StaffNotification {
     const data = (snapshot.data() ?? {}) as UnknownRecord;
     const type = (stringValue(data.type) as StaffNotificationType) || "SYSTEM";
-    const millis = this.timestampToMillis(data.createdAt);
+    const millis = timestampToMillis(data.createdAt);
     return {
       id: snapshot.id,
       clientId: firstString(data.clientId) || clientId,
@@ -1987,7 +2201,7 @@ export class FirebaseService {
       message: firstString(data.message) || "",
       customerId: firstString(data.customerId),
       read: data.read === true,
-      createdAt: this.formatFirestoreTimestamp(data.createdAt),
+      createdAt: formatTimestamp(data.createdAt),
       createdAtMillis: millis,
       metadata: (data.metadata as Record<string, unknown>) || undefined,
     };
@@ -2170,64 +2384,6 @@ export class FirebaseService {
 
   private static isConfigurationError(error: StaffServiceError): boolean {
     return error.staffCode === "FIREBASE_CONFIG";
-  }
-
-  /* ------------------------------------------------------------------ *
-   * Timestamp helpers (the platform mixes Firestore Timestamps and epoch ms)
-   * ------------------------------------------------------------------ */
-
-  static timestampToMillis(value: unknown): number | undefined {
-    if (value === null || value === undefined) return undefined;
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    if (value instanceof Date) return value.getTime();
-    const candidate = value as { toMillis?: () => number; toDate?: () => Date; seconds?: number };
-    if (typeof candidate.toMillis === "function") {
-      const millis = candidate.toMillis();
-      return Number.isFinite(millis) ? millis : undefined;
-    }
-    if (typeof candidate.toDate === "function") return candidate.toDate().getTime();
-    if (typeof candidate.seconds === "number") return candidate.seconds * 1000;
-    if (typeof value === "string") {
-      const parsed = Date.parse(value);
-      return Number.isNaN(parsed) ? undefined : parsed;
-    }
-    return undefined;
-  }
-
-  static formatFirestoreTimestamp(value: unknown): string | undefined {
-    const millis = this.timestampToMillis(value);
-    if (millis === undefined) return undefined;
-    try {
-      return new Intl.DateTimeFormat("en-US", {
-        day: "numeric",
-        month: "short",
-        year: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      }).format(new Date(millis));
-    } catch {
-      return undefined;
-    }
-  }
-
-  private static isoTimestamp(value: unknown): string | undefined {
-    const millis = this.timestampToMillis(value);
-    return millis === undefined ? undefined : new Date(millis).toISOString();
-  }
-
-  private static formatTimeOnly(value: unknown): string {
-    const millis = this.timestampToMillis(value);
-    if (millis === undefined) return "Just now";
-    try {
-      return new Intl.DateTimeFormat("en-US", {
-        hour: "2-digit",
-        minute: "2-digit",
-        hour12: true,
-      }).format(new Date(millis));
-    } catch {
-      return "Just now";
-    }
   }
 
   /** Exposed for diagnostics screens/tests. */

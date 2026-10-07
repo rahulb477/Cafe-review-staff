@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Clock,
   Gift,
+  Phone,
   RotateCcw,
   ShieldCheck,
   Users,
@@ -269,7 +270,7 @@ export default function CustomerDetailPage({
   const stampsCount = customer.stamps;
   const isRewardReady = stampsCount >= stampTarget || customer.isEligibleForReward;
   const rewardTitle = customer.rewardName || client?.rewardName || "Reward not configured";
-  const customerCode = customer.customerCode || customer.id.substring(0, 6);
+  const customerCode = customer.customerCode || customer.displayId || "—";
   const nextStamps = Math.min(stampsCount + 1, stampTarget);
 
   /* ================= SCREEN 6 — STAMP ADDED ================= */
@@ -422,7 +423,7 @@ export default function CustomerDetailPage({
             {customer.name}
           </h2>
           <p className="mt-1 truncate text-[0.74rem] font-semibold text-espresso-400">
-            #{customerCode}
+            {customerCode === "—" ? "Customer code unavailable" : `#${customerCode}`}
           </p>
           {/* Table information only when it exists in the actual data. */}
           {customer.tableNumber && (
@@ -459,14 +460,38 @@ export default function CustomerDetailPage({
 
         <div className="divide-y divide-line-soft border-t border-line-soft pt-1">
           <InfoRow
+            icon={<Phone />}
+            label="Phone"
+            value={customer.phone || "—"}
+          />
+          <InfoRow
             icon={<Clock />}
             label="Last Stamp"
-            value={customer.lastStampAt || customer.lastVisitAt || "—"}
+            value={customer.lastStampAt || "—"}
           />
           <InfoRow
             icon={<RotateCcw />}
+            label="Lifetime Stamps"
+            value={customer.lifetimeStamps === undefined ? "—" : customer.lifetimeStamps}
+          />
+          <InfoRow
+            icon={<Gift />}
+            label="Rewards Earned"
+            value={customer.rewardsEarned === undefined ? "—" : customer.rewardsEarned}
+          />
+          <InfoRow
+            icon={<Gift />}
+            label="Rewards Redeemed"
+            value={customer.rewardsRedeemed === undefined ? "—" : customer.rewardsRedeemed}
+          />
+          <InfoRow
+            icon={<Users />}
             label="Total Visits"
-            value={`${customer.totalVisits} ${customer.totalVisits === 1 ? "visit" : "visits"}`}
+            value={
+              customer.totalVisits === undefined
+                ? "—"
+                : `${customer.totalVisits} ${customer.totalVisits === 1 ? "visit" : "visits"}`
+            }
           />
           <InfoRow
             icon={<CalendarDays />}
@@ -474,8 +499,13 @@ export default function CustomerDetailPage({
             value={customer.visitingSince || customer.createdAt || "—"}
           />
           <InfoRow
+            icon={<Clock />}
+            label="Last Visit"
+            value={customer.lastVisitAt || "—"}
+          />
+          <InfoRow
             icon={<ShieldCheck />}
-            label="Status"
+            label="Reward Status"
             value={
               <span
                 className={cn(
@@ -636,7 +666,7 @@ function RedeemModal({
           <div className="min-w-0">
             <p className="truncate text-[0.82rem] font-bold text-espresso-900">{customer.name}</p>
             <p className="truncate text-[0.7rem] font-medium text-espresso-400">
-              Customer #{customerCode}
+              {customerCode === "—" ? "Customer code unavailable" : `Customer #${customerCode}`}
             </p>
           </div>
         </div>

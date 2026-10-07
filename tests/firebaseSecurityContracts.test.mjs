@@ -58,12 +58,54 @@ test("stamp writes use the business subcollection and authenticated staff UID", 
   assert.match(service, /visitCounted: false/);
   assert.match(service, /visitCounted:\s*true,[\s\S]{0,180}visitCountedAt:\s*serverTimestamp\(\)/);
   assert.match(service, /lastVisitTransactionId: transactionId/);
-  assert.match(service, /stampVisitAlreadyApplied\(/);
+  assert.match(service, /static async addStamp\([\s\S]*?runTransaction\(firestore/);
+  assert.match(service, /transaction\.set\(transactionRef,[\s\S]*?type: "STAMP_ADDED"/);
+  assert.match(service, /transaction\.set\(\s*loyaltyRef,[\s\S]*?currentStamps: newStamps/);
   assert.doesNotMatch(service, /applyStampVisit\(visitArgs, \{ markCounted: false \}\)/);
   const block = rules.match(/match \/stampTransactions\/\{transactionId\} \{([\s\S]*?)\n      \}/)?.[1];
   assert.ok(block);
   assert.match(block, /request\.resource\.data\.staffId == uid\(\)/);
   assert.match(block, /request\.resource\.data\.staffUid == uid\(\)/);
+});
+
+test("normal stamps are cooldown-enforced by Firestore server time and have no recursive admin bypass", () => {
+  assert.match(rules, /function stampCooldownHasElapsed\(customerId\)[\s\S]*?request\.time >= lastStampAt \+ duration\.value\(12, 'h'\)/);
+  assert.match(rules, /stampCooldownHasElapsed\(request\.resource\.data\.customerId\)/);
+  assert.match(rules, /lastVisitAt is timestamp[\s\S]*?request\.time >= lastVisitAt \+ duration\.value\(12, 'h'\)/);
+  assert.match(rules, /customerData\.get\('totalVisits', -1\) == 0/);
+  assert.match(service, /static async addStamp\([\s\S]*?runTransaction\(firestore/);
+  assert.match(service, /stampCooldownErrorAfterDeniedWrite/);
+  assert.match(service, /StampCooldownError/);
+  assert.match(service, /transaction\.set\(stampNotificationRef/);
+  assert.match(service, /transaction\.set\(rewardNotificationRef/);
+  assert.match(service, /lastVisitAt: serverTimestamp\(\)/);
+  assert.match(service, /currentStamps: newStamps/);
+  assert.match(service, /const stampTarget = clientConfig\.stampTarget/);
+  assert.match(rules, /request\.resource\.data\.stampTarget == configuredClientStampTarget\(clientId\)/);
+  assert.match(rules, /function configuredClientRewardName\(clientId\)[\s\S]*?'Free Coffee'/);
+  assert.match(rules, /request\.resource\.data\.rewardName == configuredClientRewardName\(clientId\)/);
+  assert.match(service, /rewardName,\n\s+description: customerCode/);
+  assert.doesNotMatch(service, /Date\.now\(\)[\s\S]{0,80}eligible/);
+
+  const recursiveAdmin = rules.match(/match \/\{document=\*\*\} \{([\s\S]*?)\n    \}/)?.[1];
+  assert.ok(recursiveAdmin);
+  assert.match(recursiveAdmin, /allow read: if isActiveAdmin\(\)/);
+  assert.doesNotMatch(recursiveAdmin, /allow [^;]*write/);
+});
+
+test("phone uniqueness keys are scoped per business, and scanner authorization ignores QR tenant hints", () => {
+  assert.match(rules, /function phoneKey\(clientId, phone\)[\s\S]*?return clientId \+ '_' \+ phone\[1:\]/);
+  assert.match(rules, /phoneIndexId\s*==\s*phoneKey\(\s*d\(\)\.clientId/);
+  assert.match(service, /tokenClientId\.toLowerCase\(\) !== clientId\.toLowerCase\(\)/);
+  assert.match(service, /payload\.allowCustomerIdFallback/);
+  assert.match(service, /loadCustomerById\(tokenCustomerId, clientId/);
+  assert.match(service, /slug hint: purely diagnostic, NEVER authorization/i);
+});
+
+test("customer codes are never synthesized from customer document ids", () => {
+  assert.match(service, /customerCode = firstString\([\s\S]*?customerData\.customerCode,[\s\S]*?customerData\.code,[\s\S]*?customerData\.displayId/);
+  assert.doesNotMatch(service, /customerCode[^;\n]*substring\(0,\s*6\)/);
+  assert.match(service, /lastActivityMillis: lastVisitAtMillis/);
 });
 
 test("reward redemption is nested, same-business, authenticated and create-only", () => {
@@ -108,7 +150,9 @@ test("loyalty writes are tied to a counted stamp or atomic create-only reward re
   assert.ok(block);
   assert.match(block, /validStampAccountMutation\(request\.resource\.data\.clientId\)/);
   assert.match(block, /matchingRewardMutation\(/);
-  assert.match(block, /request\.resource\.data\.stamps == loyaltyStampBaseline\(\) \+ 1/);
+  assert.match(block, /request\.resource\.data\.currentStamps == loyaltyStampBaseline\(\) \+ 1/);
+  assert.match(block, /request\.resource\.data\.stamps == request\.resource\.data\.currentStamps/);
+  assert.match(block, /request\.resource\.data\.lifetimeStamps >= loyaltyLifetimeBaseline\(\)/);
   assert.match(block, /lastRewardRedemptionId/);
   assert.match(rules, /getAfter\([\s\S]*?\.data\.get\('lastRewardRedemptionId', ''\) == redemptionId/);
   assert.match(service, /lastRewardRedemptionId: redemptionId/);
@@ -116,8 +160,8 @@ test("loyalty writes are tied to a counted stamp or atomic create-only reward re
 
 test("pending stamp ledger rows cannot be presented as counted activity or dashboard stamps", () => {
   const clientConfig = read("src/services/clientConfig.ts");
-  assert.match(clientConfig, /record\.visitCounted !== false/);
-  assert.match(service, /data\.type === "STAMP_ADDED" && data\.visitCounted === false\) return null/);
+  assert.match(clientConfig, /record\.visitCounted === undefined \|\| record\.visitCounted === true/);
+  assert.match(service, /if \(!isReward && !isStampLedgerEntry\(data\)\) return null/);
   assert.match(service, /stampCountBefore: previousStamps,[\s\S]*?stampCountAfter: newStamps/);
 });
 
@@ -128,6 +172,18 @@ test("unavailable dashboard metrics render as unavailable, never as fabricated z
   assert.match(dashboard, /stats\.reviewsAvailable \? stats\.todayReviews : "—"/);
   assert.match(dashboard, /stats\.rewardsAvailable \? stats\.rewardsRedeemed : "—"/);
   assert.doesNotMatch(service, /reviews = 0;\s*reviewsAvailable = false/);
+});
+
+test("customer reconciliation is a reviewed dry run and never merges/deletes identities", () => {
+  const reconciliation = read("scripts/reconcile-customer-data.mjs");
+  assert.match(reconciliation, /const applyCounters = args\.includes\("--apply-counters"\)/);
+  assert.match(reconciliation, /destructiveCustomerMergeOrDelete: false/);
+  assert.match(reconciliation, /manual-review-only/);
+  assert.match(reconciliation, /if \(applyCounters && confirmProject !== PROJECT_ID\)/);
+  assert.doesNotMatch(reconciliation, /\.delete\s*\(|\.set\s*\([^\n]*merge/i);
+  assert.doesNotMatch(reconciliation, /customerRef\.delete|loyaltyRef\.delete/);
+  assert.match(reconciliation, /same-name matches are not automatically merged/);
+  assert.match(read("package.json"), /"reconcile:customers": "node scripts\/reconcile-customer-data\.mjs"/);
 });
 
 test("notification, stamp and reward data never use top-level legacy ledger paths", () => {

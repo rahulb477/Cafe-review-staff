@@ -35,6 +35,13 @@ test("parses a URL without scheme and with extra query params", () => {
   assert.equal(CUSTOMER_TOKEN_RE.test(result.payload.token), true);
 });
 
+test("malformed percent escapes in the untrusted URL slug do not break token parsing", () => {
+  const result = parseCustomerQrPayload(`https://app.example/bake%ZZ?ct=${TOKEN}`);
+  assert.equal(result.ok, true);
+  assert.equal(result.payload.token, TOKEN);
+  assert.equal(result.payload.clientSlugHint, "bake%ZZ");
+});
+
 test("parses a raw 64-hex token", () => {
   const result = parseCustomerQrPayload(TOKEN);
   assert.equal(result.ok, true);

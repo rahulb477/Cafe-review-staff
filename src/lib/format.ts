@@ -1,13 +1,93 @@
 /**
- * Pure presentation formatters shared by every Staff screen.
+ * Shared Staff App formatters.
  *
- * They only ever format data that already came from Firebase — nothing here
- * invents a value, so an empty list still renders an honest empty state.
+ * Timestamp parsing lives here so Firebase Timestamp objects, native Dates,
+ * ISO strings and serialized Firestore timestamp objects are treated the same
+ * everywhere. Missing or malformed data never leaks "Invalid Date" into UI.
  */
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
+const MAX_DATE_MILLIS = 8.64e15;
+export const MISSING_DATE_LABEL = "—";
+
+/** Parse all timestamp shapes used by Firestore and its JSON serializers. */
+export function timestampToMillis(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+
+  if (value instanceof Date) {
+    const millis = value.getTime();
+    return isValidMillis(millis) ? millis : undefined;
+  }
+
+  if (typeof value === "number") return isValidMillis(value) ? value : undefined;
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return undefined;
+    const millis = Date.parse(text);
+    return isValidMillis(millis) ? millis : undefined;
+  }
+
+  if (typeof value !== "object") return undefined;
+
+  const candidate = value as {
+    toMillis?: () => number;
+    toDate?: () => Date;
+    seconds?: unknown;
+    nanoseconds?: unknown;
+    _seconds?: unknown;
+    _nanoseconds?: unknown;
+  };
+
+  if (typeof candidate.toMillis === "function") {
+    try {
+      const millis = candidate.toMillis();
+      if (isValidMillis(millis)) return millis;
+    } catch {
+      // Fall through to the other Firestore/serialized representations.
+    }
+  }
+
+  if (typeof candidate.toDate === "function") {
+    try {
+      const date = candidate.toDate();
+      const millis = date instanceof Date ? date.getTime() : Number.NaN;
+      if (isValidMillis(millis)) return millis;
+    } catch {
+      // Malformed SDK-like object: try the serialized seconds fields below.
+    }
+  }
+
+  const seconds = finiteNumber(candidate.seconds ?? candidate._seconds);
+  const nanoseconds = finiteNumber(candidate.nanoseconds ?? candidate._nanoseconds) ?? 0;
+  if (
+    seconds === undefined ||
+    !Number.isInteger(seconds) ||
+    !Number.isInteger(nanoseconds) ||
+    nanoseconds < 0 ||
+    nanoseconds >= 1_000_000_000
+  ) {
+    return undefined;
+  }
+
+  const millis = seconds * 1000 + nanoseconds / 1_000_000;
+  return isValidMillis(millis) ? millis : undefined;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function isValidMillis(value: number): boolean {
+  return Number.isFinite(value) && Math.abs(value) <= MAX_DATE_MILLIS;
+}
 
 /** "Good morning" / "Good afternoon" / "Good evening" for the dashboard greeting. */
 export function greetingForHour(hour: number): string {
@@ -23,21 +103,67 @@ export function greetingForDate(now: Date = new Date()): string {
 }
 
 /** "Monday, 6 Oct" — the subtle date line under the dashboard greeting. */
-export function formatDayLabel(date: Date = new Date(), locale = "en-GB"): string {
+export function formatDayLabel(value: unknown = new Date(), locale = "en-GB"): string {
+  const millis = timestampToMillis(value);
+  if (millis === undefined) return MISSING_DATE_LABEL;
   try {
     return new Intl.DateTimeFormat(locale, {
       weekday: "long",
       day: "numeric",
       month: "short",
-    }).format(date);
+    }).format(new Date(millis));
   } catch {
-    return date.toDateString();
+    return MISSING_DATE_LABEL;
+  }
+}
+
+/** A shared full date-and-time label; missing or invalid values render an em dash. */
+export function formatTimestamp(value: unknown, locale = "en-US"): string {
+  const millis = timestampToMillis(value);
+  if (millis === undefined) return MISSING_DATE_LABEL;
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(new Date(millis));
+  } catch {
+    return MISSING_DATE_LABEL;
+  }
+}
+
+/** A shared time-only label for activity/notification rows. */
+export function formatTimestampTime(value: unknown, locale = "en-US"): string {
+  const millis = timestampToMillis(value);
+  if (millis === undefined) return MISSING_DATE_LABEL;
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    }).format(new Date(millis));
+  } catch {
+    return MISSING_DATE_LABEL;
+  }
+}
+
+/** ISO serialization for sorting and date comparisons; invalid values stay absent. */
+export function timestampToIso(value: unknown): string | undefined {
+  const millis = timestampToMillis(value);
+  if (millis === undefined) return undefined;
+  try {
+    return new Date(millis).toISOString();
+  } catch {
+    return undefined;
   }
 }
 
 /** "06 Oct 2026, 09:41" for compact secondary timestamps. */
 export function formatDateTime(millis: number | undefined, locale = "en-GB"): string | undefined {
-  if (millis === undefined || !Number.isFinite(millis)) return undefined;
+  if (millis === undefined || !isValidMillis(millis)) return undefined;
   try {
     return new Intl.DateTimeFormat(locale, {
       day: "2-digit",
@@ -54,14 +180,13 @@ export function formatDateTime(millis: number | undefined, locale = "en-GB"): st
 
 /**
  * Relative time ("2 mins ago", "3 hours ago", "Yesterday").
- * Returns undefined for missing/invalid input so the caller can render an
- * honest placeholder instead of a fake "just now".
+ * Returns undefined for missing/invalid input so a caller can render "—".
  */
 export function relativeTimeFromMillis(
   millis: number | undefined,
   now: number = Date.now()
 ): string | undefined {
-  if (millis === undefined || !Number.isFinite(millis)) return undefined;
+  if (millis === undefined || !isValidMillis(millis) || !Number.isFinite(now)) return undefined;
 
   const diff = now - millis;
   if (diff < 0) {
@@ -85,14 +210,22 @@ export function relativeTimeFromMillis(
   return formatDateTime(millis);
 }
 
-export function relativeTime(
-  iso: string | undefined,
-  now: number = Date.now()
-): string | undefined {
-  if (!iso) return undefined;
-  const millis = Date.parse(iso);
-  if (Number.isNaN(millis)) return undefined;
-  return relativeTimeFromMillis(millis, now);
+export function relativeTime(value: unknown, now: number = Date.now()): string | undefined {
+  const millis = timestampToMillis(value);
+  return millis === undefined ? undefined : relativeTimeFromMillis(millis, now);
+}
+
+/** True when a timestamp belongs to the same local calendar day as `day`. */
+export function isSameLocalDay(value: unknown, day: Date | null): boolean {
+  if (!day) return false;
+  const millis = timestampToMillis(value);
+  if (millis === undefined) return false;
+  const stamp = new Date(millis);
+  return (
+    stamp.getFullYear() === day.getFullYear() &&
+    stamp.getMonth() === day.getMonth() &&
+    stamp.getDate() === day.getDate()
+  );
 }
 
 /** "3 / 8" stamp fraction used by every loyalty surface. */

@@ -68,7 +68,7 @@ export function NotificationItem({ notification, onSelect, className }: Notifica
             {notification.message}
           </span>
           <span className="mt-1 block text-[0.66rem] font-medium text-espresso-300">
-            {notification.createdAt || "Just now"}
+            {notification.createdAt || "—"}
           </span>
         </span>
       </button>

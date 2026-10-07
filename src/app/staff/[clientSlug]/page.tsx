@@ -15,7 +15,7 @@ import {
   Users,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
-import { formatDayLabel, greetingForDate, stampFraction } from "@/lib/format";
+import { formatDayLabel, greetingForDate, isSameLocalDay, stampFraction } from "@/lib/format";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
 import {
@@ -54,16 +54,8 @@ const EMPTY_STATS: DashboardStats = {
 const MANUAL_DIRECTORY_LIMIT = 20;
 const TODAY_ACTIVITY_LIMIT = 4;
 
-function isToday(isoTimestamp: string | undefined, today: Date | null): boolean {
-  if (!isoTimestamp || !today) return false;
-  const millis = Date.parse(isoTimestamp);
-  if (Number.isNaN(millis)) return false;
-  const stamp = new Date(millis);
-  return (
-    stamp.getFullYear() === today.getFullYear() &&
-    stamp.getMonth() === today.getMonth() &&
-    stamp.getDate() === today.getDate()
-  );
+function isToday(timestamp: unknown, today: Date | null): boolean {
+  return isSameLocalDay(timestamp, today);
 }
 
 /**
@@ -444,7 +436,9 @@ export default function StaffDashboardPage({
                         {customer.name}
                       </span>
                       <span className="mt-0.5 block truncate text-[0.7rem] font-medium text-espresso-300">
-                        #{customer.customerCode || customer.id.substring(0, 6)} ·{" "}
+                        {(customer.customerCode || customer.displayId)
+                          ? `#${customer.customerCode || customer.displayId}`
+                          : "Customer code unavailable"} ·{" "}
                         {stampFraction(customer.stamps, customer.stampTarget)}
                       </span>
                     </span>

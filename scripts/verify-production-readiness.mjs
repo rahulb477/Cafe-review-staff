@@ -251,27 +251,38 @@ check("scanner stops every media track and the decode loop", () => {
   return missing.length === 0 ? true : `missing: ${missing.join(", ")}`;
 });
 
-check("stamp visits use an uncounted phase-one row and one atomic counted phase", () => {
+check("normal stamps atomically append ledger, visit, loyalty and notification", () => {
   const service = read("src/services/firebaseService.ts");
-  if (!/visitCounted: false/.test(service)) return "ledger row is not appended as uncounted";
-  if (!/visitCounted:\s*true,[\s\S]{0,180}visitCountedAt:\s*serverTimestamp\(\)/.test(service)) {
-    return "the counted-transaction update is missing";
+  if (!/static async addStamp\([\s\S]*?runTransaction\(firestore/.test(service)) {
+    return "normal Add Stamp does not use one Firestore transaction";
   }
-  if (!/stampCountBefore: previousStamps,[\s\S]*?stampCountAfter: newStamps/.test(service)) {
-    return "the counted ledger row does not capture the final concurrent stamp balance";
+  if (!/existingTxSnap\.exists\(\)/.test(service)) return "transaction idempotency read is missing";
+  if (!/transaction\.set\(transactionRef,[\s\S]*?type: "STAMP_ADDED"/.test(service)) {
+    return "immutable stamp ledger row is missing";
   }
-  if (!/outcome = await this\.applyStampVisit\(visitArgs\)/.test(service)) {
-    return "the canonical atomic visit transaction is not called";
+  if (!/transaction\.update\(customerRef,[\s\S]*?totalVisits: nextVisits[\s\S]*?lastVisitTransactionId: transactionId/.test(service)) {
+    return "visit count is not updated with the stamp";
   }
-  if (/markCounted:\s*false|append-only visit write/.test(service)) {
-    return "a fallback bypasses the counted transaction rule";
+  if (!/transaction\.set\([\s\S]*?loyaltyRef,[\s\S]*?currentStamps: newStamps/.test(service)) {
+    return "canonical loyalty balance is not updated with the stamp";
   }
-  if (!/stampVisitAlreadyApplied\(/.test(service) || !/lastVisitTransactionId: transactionId/.test(service)) {
-    return "durable idempotency markers are missing";
+  if (!/transaction\.set\(stampNotificationRef/.test(service)) {
+    return "successful stamps do not create a real Firebase notification atomically";
   }
-  if (!/staffId: session\.uid,[\s\S]*?staffUid: session\.uid/.test(service)) {
+  if (!/visitCounted: true,[\s\S]{0,180}visitCountedAt: serverTimestamp\(\)/.test(service)) {
+    return "the immutable stamp row does not record its counted visit";
+  }
+  if (/applyStampVisit\(|markCounted:\s*false|append-only visit write/.test(service)) {
+    return "a two-phase/fallback visit path remains";
+  }
+  if (!/staffId: authenticatedUid,[\s\S]*?staffUid: authenticatedUid/.test(service)) {
     return "stamp rows do not record the authenticated UID";
   }
+  if (!/function stampCooldownHasElapsed\(customerId\)[\s\S]*?request\.time[\s\S]*?duration\.value\(12, 'h'\)/.test(rules)) {
+    return "the server-authoritative 12-hour cooldown rule is missing";
+  }
+  const recursiveAdmin = rules.match(/match \/\{document=\*\*\} \{([\s\S]*?)\n    \}/)?.[1] ?? "";
+  if (/allow [^;]*write/.test(recursiveAdmin)) return "recursive admin write bypass remains";
   return true;
 });
 

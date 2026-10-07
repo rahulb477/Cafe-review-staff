@@ -144,8 +144,17 @@ function parseUrlPayload(value: string): { token: string | null; slug?: string }
     }
     const hashParams = url.hash.includes("?") ? url.hash.slice(url.hash.indexOf("?")) : url.hash;
     if (!token && hashParams) token = tokenFromQueryString(hashParams);
-    const slug = url.pathname.split("/").filter(Boolean)[0];
-    return { token, slug: slug ? decodeURIComponent(slug) : undefined };
+    const rawSlug = url.pathname.split("/").filter(Boolean)[0];
+    let slug: string | undefined;
+    if (rawSlug) {
+      try {
+        slug = decodeURIComponent(rawSlug);
+      } catch {
+        // A malformed display-only slug hint must not break token validation.
+        slug = rawSlug;
+      }
+    }
+    return { token, slug };
   }
 
   // Fall back to a manual split so a malformed URL still yields its `ct` value.

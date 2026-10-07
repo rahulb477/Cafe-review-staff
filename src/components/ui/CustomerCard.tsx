@@ -14,10 +14,8 @@ export interface CustomerCardProps {
   href?: string;
   /** Right-hand slot (defaults to the stamp fraction). */
   trailing?: React.ReactNode;
-  /** Relative last-activity line, e.g. "2 mins ago". */
+  /** Last visit timestamp in milliseconds; always sourced from Firestore. */
   activityMillis?: number;
-  /** Replaces the activity line with the total-visit count. */
-  activityFallback?: string;
   badge?: React.ReactNode;
   className?: string;
   children?: React.ReactNode;
@@ -25,21 +23,24 @@ export interface CustomerCardProps {
 
 /**
  * Customer list row (Customer Lookup, dashboard previews, Rewards queue).
- * Avatar · name · customer id · stamp fraction · relative last activity.
+ * Shows the customer's human code, current stamp balance, visits and last visit.
  */
 export function CustomerCard({
   customer,
   href,
   trailing,
   activityMillis,
-  activityFallback,
   badge,
   className,
   children,
 }: CustomerCardProps) {
   const isRewardReady = customer.isEligibleForReward || customer.stamps >= customer.stampTarget;
-  const activity = relativeTimeFromMillis(activityMillis);
-  const secondary = activity ?? activityFallback;
+  const lastVisit = relativeTimeFromMillis(activityMillis) ?? "—";
+  const visitCount =
+    customer.totalVisits === undefined
+      ? "—"
+      : `${customer.totalVisits} ${customer.totalVisits === 1 ? "visit" : "visits"}`;
+  const customerCode = customer.customerCode || customer.displayId || "—";
 
   const body = (
     <>
@@ -52,7 +53,7 @@ export function CustomerCard({
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
           <span className="truncate text-[0.88rem] font-bold text-espresso-900">
-            {customer.name}
+            {customer.name || "—"}
           </span>
           {isRewardReady && !badge && (
             <span className="inline-flex shrink-0 items-center gap-0.5 rounded-xs bg-leaf-100 px-1.5 py-0.5 text-[0.6rem] font-extrabold uppercase tracking-wide text-leaf-700">
@@ -63,14 +64,8 @@ export function CustomerCard({
           {badge}
         </span>
 
-        <span className="mt-0.5 flex items-center gap-1.5 text-[0.72rem] font-medium text-espresso-300">
-          <span className="truncate">#{customer.customerCode || customer.id.substring(0, 6)}</span>
-          {secondary && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="truncate">{secondary}</span>
-            </>
-          )}
+        <span className="mt-0.5 block truncate text-[0.72rem] font-medium text-espresso-300">
+          {customerCode === "—" ? customerCode : `#${customerCode}`} · {visitCount} · Last visit {lastVisit}
         </span>
 
         {children}

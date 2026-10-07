@@ -57,7 +57,7 @@ export function ActivityItem({
           {activity.title}
         </span>
         <span className="shrink-0 text-[0.68rem] font-semibold tabular-nums text-espresso-300">
-          {activity.timeFormatted || "Just now"}
+          {activity.timeFormatted || "—"}
         </span>
       </span>
 
@@ -67,9 +67,15 @@ export function ActivityItem({
           .join(" · ") || activity.description}
       </span>
 
-      {!compact && activity.staffName && (
+      {!compact && (
         <span className="mt-0.5 block truncate text-[0.68rem] font-medium text-espresso-300">
-          by {activity.staffName}
+          by {activity.staffName || "—"}
+        </span>
+      )}
+
+      {!compact && activity.transactionId && (
+        <span className="mt-0.5 block truncate text-[0.64rem] font-medium text-espresso-300">
+          Transaction ID: {activity.transactionId}
         </span>
       )}
     </span>

@@ -11,13 +11,18 @@ import assert from "node:assert/strict";
 import {
   avatarTintFor,
   formatDayLabel,
+  formatTimestamp,
+  formatTimestampTime,
   greetingForHour,
+  isSameLocalDay,
   initialOf,
   loyaltyProgressPercent,
   relativeTime,
   relativeTimeFromMillis,
   stampFraction,
   stampsRemainingCopy,
+  timestampToIso,
+  timestampToMillis,
 } from "../src/lib/format.ts";
 
 const NOW = Date.parse("2026-10-06T12:00:00.000Z");
@@ -53,6 +58,32 @@ test("missing or invalid timestamps never render a fake 'just now'", () => {
   assert.equal(relativeTimeFromMillis(Number.NaN, NOW), undefined);
   assert.equal(relativeTime(undefined, NOW), undefined);
   assert.equal(relativeTime("not-a-date", NOW), undefined);
+});
+
+test("central timestamp parsing accepts Firestore, Date, ISO and serialized Timestamp values", () => {
+  const seconds = Math.floor(NOW / 1000);
+  const expectedMillis = seconds * 1000 + 125;
+  assert.equal(timestampToMillis({ toMillis: () => expectedMillis }), expectedMillis);
+  assert.equal(timestampToMillis({ toDate: () => new Date(expectedMillis) }), expectedMillis);
+  assert.equal(timestampToMillis({ seconds, nanoseconds: 125_000_000 }), seconds * 1000 + 125);
+  assert.equal(timestampToMillis({ _seconds: seconds, _nanoseconds: 125_000_000 }), seconds * 1000 + 125);
+  assert.equal(timestampToMillis(new Date(NOW)), NOW);
+  assert.equal(timestampToMillis(new Date(Number.NaN)), undefined);
+  assert.equal(timestampToMillis({ toMillis: () => { throw new Error("broken timestamp"); } }), undefined);
+  assert.equal(timestampToMillis({ seconds: "bad", nanoseconds: -1 }), undefined);
+  assert.equal(timestampToMillis("not-a-date"), undefined);
+});
+
+test("central timestamp formatting never emits Invalid Date or fabricated recency", () => {
+  assert.notEqual(formatTimestamp(new Date(NOW)), "—");
+  assert.notEqual(formatTimestampTime(NOW), "—");
+  assert.equal(formatTimestamp(undefined), "—");
+  assert.equal(formatTimestampTime("broken"), "—");
+  assert.equal(timestampToIso("broken"), undefined);
+  assert.equal(timestampToIso(new Date(NOW)), new Date(NOW).toISOString());
+  assert.equal(isSameLocalDay(new Date(NOW), new Date(NOW)), true);
+  assert.equal(isSameLocalDay("bad", new Date(NOW)), false);
+  assert.equal(isSameLocalDay(new Date(NOW), null), false);
 });
 
 test("an ISO timestamp is accepted by relativeTime", () => {

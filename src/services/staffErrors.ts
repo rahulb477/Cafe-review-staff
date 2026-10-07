@@ -30,6 +30,7 @@ export type StaffErrorCode =
   | "FIRESTORE_UNAVAILABLE"
   | "LOYALTY_DISABLED"
   | "NOT_ELIGIBLE"
+  | "STAMP_COOLDOWN"
   | "DUPLICATE_OPERATION"
   | "NOTIFICATIONS_UNAVAILABLE"
   | "UNKNOWN";
@@ -56,6 +57,7 @@ export const STAFF_ERROR_MESSAGES: Record<StaffErrorCode, string> = {
   FIRESTORE_UNAVAILABLE: "Connection problem. Please try again.",
   LOYALTY_DISABLED: "The loyalty programme is switched off for this business.",
   NOT_ELIGIBLE: "This customer is not eligible for the reward yet.",
+  STAMP_COOLDOWN: "Stamp already added recently.",
   DUPLICATE_OPERATION: "This operation was already processed.",
   NOTIFICATIONS_UNAVAILABLE: "Notifications are unavailable right now.",
   UNKNOWN: "Something went wrong. Please try again.",
@@ -87,6 +89,45 @@ export class StaffServiceError extends Error {
     if (options.cause !== undefined) {
       (this as { cause?: unknown }).cause = options.cause;
     }
+  }
+}
+
+export interface StampCooldownDetails {
+  reason: "STAMP_COOLDOWN";
+  lastStampAt: unknown;
+  nextStampAt: unknown;
+  /** Display estimate only. Firestore Rules use request.time for enforcement. */
+  remainingMs: number;
+}
+
+/** A structured, user-safe cooldown rejection returned after Firestore denies the write. */
+export class StampCooldownError extends StaffServiceError {
+  readonly reason = "STAMP_COOLDOWN" as const;
+  readonly lastStampAt: unknown;
+  readonly nextStampAt: unknown;
+  readonly remainingMs: number;
+
+  constructor(options: {
+    lastStampAt: unknown;
+    nextStampAt: unknown;
+    remainingMs: number;
+    message: string;
+    technical?: StaffErrorTechnical;
+  }) {
+    super("STAMP_COOLDOWN", { message: options.message, technical: options.technical });
+    this.name = "StampCooldownError";
+    this.lastStampAt = options.lastStampAt;
+    this.nextStampAt = options.nextStampAt;
+    this.remainingMs = options.remainingMs;
+  }
+
+  get details(): StampCooldownDetails {
+    return {
+      reason: this.reason,
+      lastStampAt: this.lastStampAt,
+      nextStampAt: this.nextStampAt,
+      remainingMs: this.remainingMs,
+    };
   }
 }
 
@@ -193,6 +234,18 @@ export function toStaffServiceError(
   fallback: StaffErrorCode = "UNKNOWN",
   technical: StaffErrorTechnical = {}
 ): StaffServiceError {
+  if (error instanceof StampCooldownError) {
+    const merged = { ...error.technical, ...technical };
+    if (Object.keys(merged).length === 0) return error;
+    return new StampCooldownError({
+      lastStampAt: error.lastStampAt,
+      nextStampAt: error.nextStampAt,
+      remainingMs: error.remainingMs,
+      message: error.message,
+      technical: merged,
+    });
+  }
+
   if (error instanceof StaffServiceError) {
     const merged = { ...error.technical, ...technical };
     if (Object.keys(merged).length === 0) return error;

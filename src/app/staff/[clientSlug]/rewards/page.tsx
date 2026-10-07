@@ -141,7 +141,7 @@ export default function RewardsCatalogPage({
               <li key={customer.id}>
                 <CustomerCard
                   customer={customer}
-                  activityMillis={customer.lastActivityMillis}
+                  activityMillis={customer.lastVisitAtMillis}
                   trailing={
                     <LinkButton
                       href={`/staff/${clientSlug}/customers/${customer.id}`}
