@@ -121,13 +121,17 @@ export interface StaffActivityItem {
 
 export interface DashboardStats {
   todayStamps: number;
-  todayCustomers: number;
+  /** Null only when the count is unavailable; zero is a real Firestore count. */
+  todayCustomers: number | null;
   todayReviews: number;
   rewardsRedeemed: number;
-  /** false → the reviews metric could not be read (rules/network); UI shows "—". */
+  /** false means the live metric could not be read (rules/network); UI shows "—". */
+  stampsAvailable: boolean;
   reviewsAvailable: boolean;
-  /** false → today's customers could not be counted (index/rules); UI shows "—". */
   customersAvailable: boolean;
+  rewardsAvailable: boolean;
+  /** Precise backend failure copy for the existing dashboard error notice. */
+  errorMessage?: string;
   loadedAt?: string;
 }
 

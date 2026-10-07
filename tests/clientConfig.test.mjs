@@ -14,8 +14,12 @@ import {
   DEFAULT_STAMP_TARGET,
   buildClientConfig,
   buildStaffUser,
+  isRewardRedeemable,
   isStampLedgerEntry,
+  nextStampBalance,
+  remainingStampsAfterRedemption,
   resolveLoyaltyState,
+  stampVisitAlreadyApplied,
   resolveStampTarget,
   validateStaffRecord,
   visitBaseline,
@@ -119,7 +123,8 @@ test("validates staffUsers records: active, inactive, missing client", () => {
     clientId: "cli_bake01",
     name: "Amit",
     status: "ACTIVE",
-    clientIds: ["cli_bake01"],
+    // A legacy tenant list cannot override the canonical clientId.
+    clientIds: ["cli_other"],
   });
   assert.equal(active.ok, true);
   assert.equal(active.clientId, "cli_bake01");
@@ -141,12 +146,16 @@ test("validates staffUsers records: active, inactive, missing client", () => {
   assert.equal(noClient.ok, false);
   assert.equal(noClient.reason, "missingClientId");
 
-  const legacyList = validateStaffRecord({ uid: "u1", status: "ACTIVE", clientIds: ["cli_only"] });
-  assert.equal(legacyList.ok, true);
-  assert.equal(legacyList.clientId, "cli_only");
+  const nonStringClient = validateStaffRecord({ uid: "u1", clientId: 123, status: "ACTIVE" });
+  assert.equal(nonStringClient.ok, false);
+  assert.equal(nonStringClient.reason, "invalidClientId");
 
-  // One staff member works for ONE business: multiple assignments never widen
-  // the tenant — they are ignored (clientId stays authoritative).
+  const legacyList = validateStaffRecord({ uid: "u1", status: "ACTIVE", clientIds: ["cli_only"] });
+  assert.equal(legacyList.ok, false);
+  assert.equal(legacyList.reason, "missingClientId");
+  assert.match(legacyList.notes.join(" "), /clientIds is ignored/);
+
+  // Multiple legacy assignments never establish staff business identity.
   const multi = validateStaffRecord({ uid: "u1", clientIds: ["a", "b"], status: "ACTIVE" });
   assert.equal(multi.ok, false);
   assert.equal(multi.reason, "missingClientId");
@@ -203,7 +212,33 @@ test("visit baseline mirrors the Security Rules oldVisits() reader", () => {
   assert.equal(visitBaseline(3.5), 0);
 });
 
-test("stamp ledger rows are distinguished from reward redemptions", () => {
+test("stamp retries replay either durable idempotency marker and increment exactly once", () => {
+  const transactionId = "tx_stamp_one";
+  assert.equal(stampVisitAlreadyApplied({ visitCounted: true }, {}, transactionId), true);
+  assert.equal(
+    stampVisitAlreadyApplied({ visitCounted: false }, { lastVisitTransactionId: transactionId }, transactionId),
+    true
+  );
+  assert.equal(
+    stampVisitAlreadyApplied({ visitCounted: false }, { lastVisitTransactionId: "other" }, transactionId),
+    false
+  );
+  assert.equal(nextStampBalance(0), 1);
+  assert.equal(nextStampBalance(7), 8);
+  assert.equal(nextStampBalance("7"), 8);
+});
+
+test("reward eligibility and remaining balance match the redemption operation", () => {
+  assert.equal(isRewardRedeemable(7, 8), false);
+  assert.equal(isRewardRedeemable(8, 8), true);
+  assert.equal(isRewardRedeemable(12, 8), true);
+  assert.equal(remainingStampsAfterRedemption(8, 8), 0);
+  assert.equal(remainingStampsAfterRedemption(12, 8), 4);
+});
+
+test("stamp ledger rows are distinguished from pending visits and reward redemptions", () => {
+  assert.equal(isStampLedgerEntry({ type: "STAMP_ADDED", delta: 1, visitCounted: false }), false);
+  assert.equal(isStampLedgerEntry({ type: "STAMP_ADDED", delta: 1, visitCounted: true }), true);
   assert.equal(isStampLedgerEntry({ type: "STAMP_ADDED", delta: 1 }), true);
   assert.equal(isStampLedgerEntry({ delta: 1 }), true);
   assert.equal(isStampLedgerEntry({}), true);

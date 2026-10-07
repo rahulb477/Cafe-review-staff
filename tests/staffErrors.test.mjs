@@ -8,6 +8,7 @@ import {
   STAFF_ERROR_MESSAGES,
   StaffServiceError,
   describeErrorForDiagnostics,
+  isMissingIndexError,
   isOfflineError,
   isPermissionDeniedError,
   toStaffServiceError,
@@ -103,6 +104,33 @@ test("recognises error classes without relying on message parsing alone", () => 
   assert.equal(isPermissionDeniedError(new Error("nope")), false);
   assert.equal(isOfflineError({ code: "firestore/unavailable" }), true);
   assert.equal(isOfflineError(new Error("all good")), false);
+});
+
+test("distinguishes missing indexes, not-found, permission, network and unknown", () => {
+  const missingIndex = Object.assign(new Error("The query requires an index. You can create it here."), {
+    code: "failed-precondition",
+  });
+  assert.equal(isMissingIndexError(missingIndex), true);
+  assert.equal(toStaffServiceError(missingIndex).staffCode, "MISSING_INDEX");
+  assert.equal(
+    toStaffServiceError(missingIndex).message,
+    "Data index is being prepared. Please try again shortly."
+  );
+
+  const otherPrecondition = Object.assign(new Error("The client is not in a valid state."), {
+    code: "failed-precondition",
+  });
+  assert.equal(isMissingIndexError(otherPrecondition), false);
+  assert.equal(toStaffServiceError(otherPrecondition).staffCode, "UNKNOWN");
+
+  const notFound = toStaffServiceError(Object.assign(new Error("missing"), { code: "not-found" }));
+  assert.equal(notFound.staffCode, "NOT_FOUND");
+  assert.equal(notFound.message, "No customer data was found.");
+
+  const permission = toStaffServiceError(Object.assign(new Error("denied"), { code: "permission-denied" }));
+  assert.equal(permission.staffCode, "PERMISSION_DENIED");
+  const network = toStaffServiceError(Object.assign(new Error("offline"), { code: "unavailable" }));
+  assert.equal(network.staffCode, "NETWORK");
 });
 
 test("preserves an existing staff error and only merges new technical detail", () => {

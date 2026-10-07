@@ -6,6 +6,7 @@ import { Bell, ChevronDown, X } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { useStaffApp } from "@/context/StaffAppContext";
 import { FirebaseService } from "@/services/firebaseService";
+import { describeErrorForDiagnostics, toStaffServiceError } from "@/services/staffErrors";
 import type { StaffNotification } from "@/services/types";
 import { CafeLogo } from "./Icons";
 import { CustomerAvatar } from "./ui/CustomerAvatar";
@@ -23,7 +24,7 @@ import { EmptyState } from "./ui/EmptyState";
  * mark-as-read write both go to Firestore.
  */
 export function StaffHeader() {
-  const { client, staffUser, clientId, setIsDrawerOpen } = useStaffApp();
+  const { status, session, client, staffUser, clientId, setIsDrawerOpen } = useStaffApp();
   const [showNotifications, setShowNotifications] = useState(false);
   const [notifications, setNotifications] = useState<StaffNotification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(true);
@@ -38,7 +39,7 @@ export function StaffHeader() {
 
   // Real-time listener scoped to the authenticated staff member's business.
   useEffect(() => {
-    if (!clientId) return;
+    if (status !== "authorized" || !session?.uid || !clientId) return;
 
     let active = true;
 
@@ -61,7 +62,7 @@ export function StaffHeader() {
       active = false;
       unsubscribe();
     };
-  }, [clientId]);
+  }, [status, session?.uid, clientId]);
 
   // Close the sheet on outside tap / Escape.
   useEffect(() => {
@@ -97,7 +98,15 @@ export function StaffHeader() {
     try {
       await FirebaseService.markNotificationRead(notification.id);
     } catch (error: unknown) {
-      console.warn("[staff-notifications] mark read notice:", error);
+      const staffErr = toStaffServiceError(error, "NOTIFICATIONS_UNAVAILABLE");
+      setNotifications((current) =>
+        current.map((item) => (item.id === notification.id ? { ...item, read: false } : item))
+      );
+      setNotificationsError(staffErr.message);
+      console.warn(
+        "[staff-notifications] mark read failed:",
+        describeErrorForDiagnostics(staffErr)
+      );
     }
   };
 

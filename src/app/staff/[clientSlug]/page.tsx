@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState, use } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, use } from "react";
 import Link from "next/link";
 import {
   ChevronRight,
@@ -45,8 +45,10 @@ const EMPTY_STATS: DashboardStats = {
   todayCustomers: 0,
   todayReviews: 0,
   rewardsRedeemed: 0,
+  stampsAvailable: true,
   reviewsAvailable: true,
   customersAvailable: true,
+  rewardsAvailable: true,
 };
 
 const MANUAL_DIRECTORY_LIMIT = 20;
@@ -80,7 +82,7 @@ export default function StaffDashboardPage({
   const resolvedParams = use(params);
   const clientSlug = resolvedParams.clientSlug;
 
-  const { client, staffUser, clientId, playChime } = useStaffApp();
+  const { status, session, client, staffUser, clientId, playChime } = useStaffApp();
 
   const [stats, setStats] = useState<DashboardStats>(EMPTY_STATS);
   const [isStatsLoading, setIsStatsLoading] = useState(true);
@@ -101,6 +103,7 @@ export default function StaffDashboardPage({
   const [manualMessage, setManualMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(
     null
   );
+  const manualStampOperationsRef = useRef<Map<string, string>>(new Map());
 
   // Resolved after mount (deferred a tick) so the time-aware greeting and the
   // date line can never mismatch the server render, and the effect body never
@@ -122,7 +125,7 @@ export default function StaffDashboardPage({
 
   /* ---------------- live Firestore metrics + activity ---------------- */
   useEffect(() => {
-    if (!clientId) return;
+    if (status !== "authorized" || !session?.uid || !clientId) return;
     let active = true;
 
     const unsubscribeStats = FirebaseService.listenToDashboardStats(
@@ -130,7 +133,7 @@ export default function StaffDashboardPage({
         if (!active) return;
         setStats(liveStats);
         setIsStatsLoading(false);
-        setStatsError(null);
+        setStatsError(liveStats.errorMessage ?? null);
       },
       (error) => {
         if (!active) return;
@@ -158,11 +161,11 @@ export default function StaffDashboardPage({
       unsubscribeStats();
       unsubscribeActivity();
     };
-  }, [clientId]);
+  }, [status, session?.uid, clientId]);
 
   /* ---------------- customer directory (manual stamp picker) ---------------- */
   const loadDirectory = useCallback(async () => {
-    if (!clientId) return;
+    if (status !== "authorized" || !session?.uid || !clientId) return;
     setIsDirectoryLoading(true);
     try {
       const customers = await FirebaseService.getCustomers({ limit: MANUAL_DIRECTORY_LIMIT });
@@ -177,7 +180,7 @@ export default function StaffDashboardPage({
     } finally {
       setIsDirectoryLoading(false);
     }
-  }, [clientId]);
+  }, [status, session?.uid, clientId]);
 
   /* ---------------- manual stamp ---------------- */
   // The directory is read on demand: opening the picker is the only thing that
@@ -196,13 +199,18 @@ export default function StaffDashboardPage({
     setManualMessage(null);
 
     try {
+      const operationId =
+        manualStampOperationsRef.current.get(target.id) ??
+        FirebaseService.createIdempotencyKey("stamp");
+      manualStampOperationsRef.current.set(target.id, operationId);
       const result = await FirebaseService.addStamp(
         target.id,
-        undefined,
+        operationId,
         "Manual stamp from dashboard"
       );
 
       if (result.success) {
+        manualStampOperationsRef.current.delete(target.id);
         playChime(result.rewardUnlocked ? "reward" : "stamp");
         setManualMessage({
           tone: "ok",
@@ -252,7 +260,7 @@ export default function StaffDashboardPage({
           <StatCard
             label="Today's Stamps"
             caption="since midnight"
-            value={stats.todayStamps}
+            value={stats.stampsAvailable ? stats.todayStamps : "—"}
             icon={Coffee}
             tone="clay"
             loading={isStatsLoading}
@@ -260,7 +268,11 @@ export default function StaffDashboardPage({
           <StatCard
             label="Customers"
             caption="new today"
-            value={stats.customersAvailable ? stats.todayCustomers : "—"}
+            value={
+              stats.customersAvailable && stats.todayCustomers !== null
+                ? stats.todayCustomers
+                : "—"
+            }
             icon={Users}
             tone="leaf"
             loading={isStatsLoading}
@@ -276,7 +288,7 @@ export default function StaffDashboardPage({
           <StatCard
             label="Rewards Redeemed"
             caption="total"
-            value={stats.rewardsRedeemed}
+            value={stats.rewardsAvailable ? stats.rewardsRedeemed : "—"}
             icon={Gift}
             tone="espresso"
             loading={isStatsLoading}

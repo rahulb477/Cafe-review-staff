@@ -190,6 +190,7 @@ export function StaffAppProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(
     async (email: string, password: string) => {
       setStatus("authorizing");
+      setSession(null);
       setAuthorizationError(null);
 
       const result = await FirebaseService.login(email, password);

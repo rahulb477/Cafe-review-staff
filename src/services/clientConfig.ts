@@ -156,8 +156,8 @@ export interface StaffRecordValidation {
 
 /**
  * staffUsers/{uid} validation — ONE staff member belongs to ONE business.
- * `clientId` (with a single-entry `clientIds` legacy fallback) is the only
- * source of the tenant; it is never taken from the URL, storage or any QR.
+ * Only the canonical `clientId` field is accepted; legacy tenant lists are not
+ * an identity source. A business is never taken from the URL, storage or QR.
  */
 export function validateStaffRecord(data: unknown): StaffRecordValidation {
   const record = asRecord(data);
@@ -175,19 +175,23 @@ export function validateStaffRecord(data: unknown): StaffRecordValidation {
     notes.push("staffUsers document has neither `active` nor `status`; treated as active");
   }
 
-  let clientId = firstString(record.clientId);
-  if (!clientId) {
-    const list = Array.isArray(record.clientIds) ? record.clientIds : [];
-    const entries = list.map((item) => stringValue(item)).filter((item): item is string => Boolean(item));
-    if (entries.length === 1) {
-      clientId = entries[0];
-      notes.push("resolved clientId from single-entry clientIds[] (legacy assignment list)");
-    } else if (entries.length > 1) {
-      notes.push("staffUsers document lists multiple businesses; only clientId is honoured");
-    }
+  if (record.clientId !== undefined && typeof record.clientId !== "string") {
+    return {
+      ok: false,
+      reason: "invalidClientId",
+      status,
+      active: true,
+      notes: ["staffUsers.clientId must be a string"],
+    };
   }
+  const clientId = typeof record.clientId === "string" ? firstString(record.clientId) : undefined;
 
-  if (!clientId) return { ok: false, reason: "missingClientId", status, active: true, notes };
+  if (!clientId) {
+    if (Array.isArray(record.clientIds) && record.clientIds.length > 0) {
+      notes.push("staffUsers.clientIds is ignored; canonical staffUsers.clientId is required");
+    }
+    return { ok: false, reason: "missingClientId", status, active: true, notes };
+  }
   if (clientId.length > 1500 || /[\/\\]/.test(clientId)) {
     return { ok: false, reason: "invalidClientId", status, active: true, notes };
   }
@@ -264,16 +268,49 @@ export function visitBaseline(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
 }
 
+/** Idempotency markers shared by the stamp transaction and customer document. */
+export function stampVisitAlreadyApplied(
+  ledgerData: unknown,
+  customerData: unknown,
+  transactionId: string
+): boolean {
+  const ledger = asRecord(ledgerData);
+  const customer = asRecord(customerData);
+  return (
+    ledger.visitCounted === true ||
+    stringValue(customer.lastVisitTransactionId) === transactionId
+  );
+}
+
+/** A stamp event increases the current loyalty balance by exactly one. */
+export function nextStampBalance(currentStamps: unknown): number {
+  return nonNegativeInt(currentStamps) + 1;
+}
+
+/** A redemption is valid only at the configured threshold. */
+export function isRewardRedeemable(currentStamps: unknown, stampTarget: unknown): boolean {
+  const target = resolveStampTarget(stampTarget);
+  return nonNegativeInt(currentStamps) >= target;
+}
+
+/** Preserve excess stamps after one reward is redeemed. */
+export function remainingStampsAfterRedemption(
+  currentStamps: unknown,
+  stampTarget: unknown
+): number {
+  return Math.max(0, nonNegativeInt(currentStamps) - resolveStampTarget(stampTarget));
+}
+
 /**
  * True when a `clients/{clientId}/stampTransactions/{documentId}` row is a
- * stamp (a counted visit), false for reward redemptions. Used by the dashboard
- * so "today's stamps" is real ledger data, never a guess.
+ * stamp (a counted visit), false for uncounted/pending rows and redemptions.
+ * Used by the dashboard so "today's stamps" is real ledger data, never a guess.
  */
 export function isStampLedgerEntry(data: unknown): boolean {
   const record = asRecord(data);
   const type = stringValue(record.type);
   if (type === "REWARD_REDEEMED" || type === "REWARD") return false;
-  if (type === "STAMP_ADDED") return true;
+  if (type === "STAMP_ADDED") return record.visitCounted !== false;
   const delta = numberValue(record.delta);
   if (delta !== undefined) return delta >= 1;
   return true;
